@@ -1,0 +1,83 @@
+# ──────────────────────────────────────────────────────────────
+# Mercury Trader — Environment profiles.
+#
+# Each profile selects the broker backend + MT5 credentials (as env-var
+# names), the symbol map (canonical instrument -> broker symbol + contract
+# metadata), the PostgreSQL database, and log/data directories.
+#
+# The active profile is chosen from, in order of precedence:
+#   mercury --env <name>  >  MERCURY_ENV  >  base.yaml `environment:`  >
+#   `default:` below.
+#
+# `deployment.mode` (base.yaml / DEPLOYMENT_MODE) is independent — it decides
+# whether orders are REAL (live) or simulated (paper).
+#
+# `trading_enabled` is the manual ARM flag. Live profiles ship `false` and
+# must be flipped to `true` by a human before any order can be placed.
+# ──────────────────────────────────────────────────────────────
+
+default: development
+
+environments:
+  development:
+    description: Local development — paper broker, synthetic data, own database.
+    broker_backend: paper
+    trading_enabled: true
+    symbols:
+      GOLD:
+        broker_symbol: XAUUSD
+        preferred: true
+        contract_size: 100.0
+        point: 0.01
+        digits: 2
+        min_lot: 0.01
+        lot_step: 0.01
+    database_name: mercury_development
+    log_dir: logs/development
+    data_dir: data/development
+
+  metaquotes_demo:
+    description: MetaTrader 5 demo account — real market data, paper risk (forward test).
+    broker_backend: mt5
+    trading_enabled: true
+    mt5:
+      login_env: MT5_LOGIN_DEMO
+      password_env: MT5_PASSWORD_DEMO
+      server: MetaQuotes-Demo
+      terminal_path_env: MT5_TERMINAL_PATH
+      enable_launch_env: MT5_ENABLE_TERMINAL_LAUNCH
+    symbols:
+      GOLD:
+        broker_symbol: XAUUSD
+        preferred: true
+        contract_size: 100.0
+        point: 0.01
+        digits: 2
+        min_lot: 0.01
+        lot_step: 0.01
+    database_name: mercury_demo
+    log_dir: logs/demo
+    data_dir: data/demo
+
+  exness_live:
+    description: Exness LIVE account — REAL MONEY. trading_enabled must be set to true manually.
+    broker_backend: mt5
+    trading_enabled: false
+    mt5:
+      login_env: MT5_LOGIN_LIVE
+      password_env: MT5_PASSWORD_LIVE
+      server: Exness-MT5
+      terminal_path_env: MT5_TERMINAL_PATH
+      enable_launch_env: MT5_ENABLE_TERMINAL_LAUNCH
+    symbols:
+      GOLD:
+        broker_symbol: XAUUSD
+        preferred: true
+        contract_size: 100.0
+        point: 0.01
+        digits: 2
+        min_lot: 0.01
+        lot_step: 0.01
+    database_name: mercury_live
+    log_dir: logs/live
+    data_dir: data/live

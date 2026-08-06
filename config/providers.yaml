@@ -1,0 +1,69 @@
+# ──────────────────────────────────────────────────────────────
+# Providers — external integrations configuration.
+# Secrets (API keys, passwords) come from environment / .env.
+# ──────────────────────────────────────────────────────────────
+
+broker:
+  #   mt5   = MetaTrader 5 terminal (Exness) — real + demo accounts
+  #   paper = local simulation (default)
+  # Selected by the active environment profile (config/environments.yaml).
+  backend: paper
+  mt5:
+    symbol: GOLD
+    timeframe: M5
+    order_mode: MARKET
+    magic: 77001
+    slippage_points: 20
+    # Credentials come from the environment profile's env-var names
+    # (e.g. MT5_LOGIN_LIVE / MT5_PASSWORD_LIVE for the exness_live profile).
+
+data:
+  # Historical + live candle source.
+  backend: mt5
+  mt5:
+    history_bars: 100000
+    default_timeframe: M5
+
+news:
+  backends: [economic_calendar]        # enabled news adapters, e.g. [economic_calendar, rss]
+  economic_calendar:
+    source: forex_factory              # forex_factory | myfxbook
+    major_impact_only: true
+    blackout_minutes: 15               # before/after window around NFP/CPI/FOMC
+  rss:
+    feeds: []                  # list of RSS feed URLs (XAU/gold/news)
+  sentiment:
+    source: none               # none | fear_greed | social
+    fear_greed_url: https://production.dataviz.cnn.io/index/fearandgreed/graphdata
+
+llm:
+  #   hybrid  = local fast pre-trade + external heavy reasoning
+  #   local   = everything through Ollama
+  #   external= everything through OpenAI/Anthropic
+  #   none    = rule-based Hermes (no LLM calls)
+  mode: hybrid
+  external:
+    provider: openai           # openai | anthropic
+    openai: {}
+    anthropic: {}
+  local:
+    provider: ollama
+    timeout_seconds: 30
+  structured:                  # JSON schema settings for reasoning output
+    temperature: 0.2
+    max_tokens: 1500
+  confidence:
+    min_gate: 0.55             # pre-trade minimum (mirrors risk.guards.min_confidence)
+
+notifications:
+  backend: telegram
+  telegram:
+    chat_id: ""                # from TELEGRAM_CHAT_ID
+    disable_notification_for: [hermes_pre_trade]
+
+signal:
+  providers: [internal, tradingview]
+  webhook:
+    host: 0.0.0.0
+    port: 9100                 # from SIGNAL_WEBHOOK_PORT
+    secret: ""                 # from SIGNAL_WEBHOOK_SECRET

@@ -1,0 +1,44 @@
+# ──────────────────────────────────────────────────────────────
+# Risk management — conservative fixed % + hard guards.
+# RiskManager enforces these on every candidate trade.
+# ──────────────────────────────────────────────────────────────
+
+# Fixed percentage of current equity risked per trade (0.5 = 0.5%).
+risk_per_trade_percent: 0.5
+min_risk_per_trade_percent: 0.1
+max_risk_per_trade_percent: 1.0
+
+# Position sizing model.
+sizing:
+  mode: fixed_percent        # fixed_percent | adaptive
+  fixed_percent: 0.5
+  adaptive:
+    enabled: false
+    # Multiply fixed % by Hermes confidence discount (0.5..1.0).
+    confidence_multiplier: false
+
+# Hard guards — a signal failing any guard is rejected.
+guards:
+  max_open_positions: 1
+  max_daily_trades: 5
+  max_daily_drawdown_percent: 3.0      # stop opening new trades for the day
+  max_total_drawdown_percent: 8.0      # kill-switch level (halts all trading)
+  min_account_equity: 100              # USD; below this, no trading
+  max_spread_points: 30
+  session_check: true                  # only trade inside configured sessions
+  min_confidence: 0.55                 # Hermes pre-trade confidence gate
+  news_blackout_minutes: 15            # no entries 15 min before/after major news (NFP/CPI/FOMC)
+  max_slippage_points: 20
+
+# Trailing / management defaults (strategy may override).
+management:
+  move_to_breakeven:
+    enabled: true
+    trigger_r: 0.5                     # move SL to BE after +0.5R
+  partial_take_profit:
+    enabled: false
+
+# Kill switch persists to DB; requires manual or scheduled re-arm.
+kill_switch:
+  enabled: true
+  rearm_after_hours: 24

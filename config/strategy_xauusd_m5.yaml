@@ -1,0 +1,50 @@
+# ──────────────────────────────────────────────────────────────
+# Strategy — XAUUSD M5 (example configurable rule strategy).
+# This is the DEFAULT in-bot strategy. The strategy engine loads
+# strategies from this file; each has its own criteria block.
+# ──────────────────────────────────────────────────────────────
+
+strategies:
+  - id: xauusd_m5_trend
+    enabled: true
+    symbol: GOLD
+    timeframe: M5
+    description: Trend-following EMA cross with ATR-based stops and momentum filter.
+
+    # — Signals are generated on closed-candle confirmation.
+    entry:
+      fast_ema_period: 9
+      slow_ema_period: 21
+      # Trend filter: price must be above/below the 50 EMA.
+      trend_ema_period: 50
+      # Momentum filter: 14-period RSI in the direction band.
+      rsi_period: 14
+      rsi_buy_max: 70
+      rsi_sell_min: 30
+      # Volume/volatility sanity: don't trade when M5 ATR is extreme.
+      atr_period: 14
+      max_atr_multiplier: 2.5          # reject when ATR > 2.5x its 100-bar average
+      candle_confirmation: true        # wait for candle close before acting
+
+    # — Order parameters (points; XAUUSD 1 point = 0.01 price unit).
+    order:
+      order_type: market               # market | limit | stop
+      direction: both                  # long | short | both
+      sl_pips: 12
+      tp_pips: 20
+      # SL/TP can alternatively be ATR-multiples:
+      sl_atr_multiplier: 1.5
+      tp_atr_multiplier: 2.5
+      use_atr_levels: true
+      magic: 77001
+
+    # — Filters that disable the strategy.
+    filters:
+      min_spread_points: 5
+      max_spread_points: 30
+      session: full_xauusd
+      avoid_news_minutes: 5
+
+    # — Success criteria override (merges over global trading_criteria).
+    success:
+      count_breakeven_as_win: true

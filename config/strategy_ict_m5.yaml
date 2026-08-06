@@ -1,0 +1,74 @@
+# ──────────────────────────────────────────────────────────────
+# Strategy — XAUUSD M5 ICT/SMC (Trading Strategy Specification V1).
+# Implements the discretionary SMC playbook mechanically:
+#   H1 bias (last H1 BOS) + H4 filter (must not oppose)
+#   Mandatory H1 liquidity sweep + one of (Order Block / H1 trendline
+#   bounce / H1+H4 alignment), M5 confirmation-close entry, SL beyond
+#   the block + 0.5 ATR(14) M5, BE at 1R, TP = next opposing M5
+#   liquidity (skip if < 2R), early exit on opposite M5 BOS.
+# ──────────────────────────────────────────────────────────────
+
+strategies:
+  - id: xauusd_m5_ict
+    enabled: true
+    symbol: GOLD
+    timeframe: M5
+    description: ICT/SMC — H1 bias, H4 filter, liquidity sweeps, order blocks, M5 confirmation close.
+
+    order:
+      order_type: market
+      direction: both
+      magic: 77001
+
+    # Filters that disable the strategy.
+    filters:
+      min_spread_points: 5
+      max_spread_points: 30
+      session: full_xauusd
+      avoid_news_minutes: 15
+
+    ict:
+      # Market structure / liquidity context.
+      context:
+        h1_bars: 1500
+        h4_bars: 500
+        swing_floor_atr: 0.25          # swing must be >= 0.25 x ATR(14) of its timeframe
+        eq_tolerance_atr: 0.1          # equal high/low pairing tolerance
+        round_number_step: 10.0        # exclude round-number levels (XAUUSD 0.01 points)
+        round_number_tol: 0.05
+        exclude_session_high_low: true
+
+      # Order block / displacement.
+      displacement:
+        period: 20                     # average body of last 20 H1 candles
+        body_mult: 1.5                 # displacement body >= 1.5 x average body
+        ob_lookback: 5                 # last opposite-colored candle within N bars
+
+      # H1 trendlines (auto-detected through swing lows/highs).
+      trendline:
+        min_touches: 2
+        prefer_touches: 3
+        tolerance_atr: 0.15            # wick-touch tolerance
+        max_swings: 30
+        recent_bars: 48                # line must be touched within last N H1 bars
+
+      # Liquidity sweeps on M5 against H1 pools.
+      sweep:
+        max_distance_points: 300       # pool must be within this many 0.01 points of price
+        fresh_bars: 12                 # sweep is live for N M5 candles
+
+      # M5 confirmation close.
+      confirmation:
+        lookback_bars: 8               # confirmation must close within N M5 candles of the sweep
+
+      sl_buffer_atr: 0.5               # SL = structural level +- 0.5 x M5 ATR(14)
+      min_rr: 2.0                      # skip when next opposing liquidity is < 2R
+
+      # Trade management.
+      management:
+        breakeven_at_r: 1.0
+        early_exit_on_opposite_bos: true
+
+      # Re-entry (max one re-entry per liquidity level).
+      reentry:
+        max_attempts_per_level: 2

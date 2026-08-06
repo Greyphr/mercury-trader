@@ -1,0 +1,3 @@
+# LLM providers for the Hermes reasoning engine.
+# Optional — Hermes works without these (offline/rule-based mode).
+openai>=1.30

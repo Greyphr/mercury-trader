@@ -1,0 +1,53 @@
+# ──────────────────────────────────────────────────────────────
+# Mercury Trader — Base configuration
+# ──────────────────────────────────────────────────────────────
+project:
+  name: Mercury Trader
+  version: 0.1.0
+
+# deployment.mode overrides live trading behaviour.
+#   live      = execute real orders on MT5
+#   paper     = simulate fills locally (default, safe)
+#   read_only = collect data + reason only, never trade
+deployment:
+  mode: paper
+
+# Active environment profile (see environments.yaml). Overridable with the
+# MERCURY_ENV env var or `mercury --env <name>`.
+environment: development
+
+timezone: UTC
+
+# Internal job cadences (seconds between runs)
+jobs:
+  market_data: 60          # poll/refresh candles
+  price_monitor: 5         # monitor open positions
+  news_collection: 300     # pull news & sentiment
+  hermes_daily: 21600      # daily deep analysis (runs at configured hour too)
+  hermes_daily_hour: "00:30"
+  reports_daily: "23:55"
+  reports_weekly: "fri 23:55"
+  reports_monthly: "last-day 23:55"
+  health_check: 60
+  backtest_queue: 900      # process human-approved proposals
+
+# Market sessions the bot is allowed to trade (UTC). XAUUSD trades
+# nearly 24/5; Exness gold has a daily maintenance break ~00:00-01:00.
+# Spec V1: London and New York only; no entries in the first 15 minutes
+# after the London open.
+trading_sessions:
+  - name: london
+    days: [mon, tue, wed, thu, fri]
+    start: "07:00"
+    end: "16:00"
+    pause:               # first 15 minutes after London open
+      start: "07:00"
+      end: "07:15"
+  - name: new_york
+    days: [mon, tue, wed, thu, fri]
+    start: "12:00"
+    end: "21:00"
+
+paths:
+  data_dir: data
+  log_dir: logs

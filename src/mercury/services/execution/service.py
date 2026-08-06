@@ -1,0 +1,382 @@
+"""Execution service: routes approved signals to the broker, persists trades,
+and monitors open positions (TP/SL detection, MT5 server-side closes)."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
+
+from mercury.core.events import Event
+from mercury.core.symbols import SymbolMappingError, get_symbol_mapper
+from mercury.models.orm import TradeRecord
+from mercury.models.schemas import Signal, TradeStatus
+from mercury.services.base import BackgroundService
+from mercury.services.execution.broker import (
+    BrokerAdapter,
+    ClosedTrade,
+    MT5BrokerAdapter,
+    PaperBrokerAdapter,
+)
+
+
+class ExecutionService(BackgroundService):
+    """Executes approved signals and monitors positions."""
+
+    name = "execution"
+    poll_interval_seconds: int = 5
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._broker: BrokerAdapter | None = None
+        self._prices: dict[str, dict[str, float]] = {}
+        self._mapper = get_symbol_mapper(self.settings)
+        self._trading_allowed = True
+        self._stage_guard: Callable[[str], bool] | None = None
+        self.poll_interval_seconds = self.settings.base.jobs.price_monitor
+
+    @property
+    def broker(self) -> BrokerAdapter | None:
+        return self._broker
+
+    def set_trading_allowed(self, allowed: bool) -> None:
+        """Arm/disarm order execution (called by the startup validation gate)."""
+        self._trading_allowed = allowed
+        self.logger.info("trading gate updated", extra={"allowed": allowed})
+
+    def set_stage_guard(self, guard: Callable[[str], bool] | None) -> None:
+        """Install the per-strategy lifecycle guard (wired by the orchestrator)."""
+        self._stage_guard = guard
+
+    async def start(self) -> None:
+        await super().start()
+        cfg = self.settings.providers.broker
+        if not self.settings.environment.trading_enabled:
+            self._broker = None
+            self.logger.warning("execution disabled — environment not armed for trading")
+            self.mark_healthy("execution disabled (trading not armed)")
+            return
+        if self.settings.base.deployment.mode == "read_only":
+            self._broker = None
+            self.logger.info("read_only mode — execution disabled")
+            self.mark_healthy("execution disabled (read_only)")
+            return
+        if cfg.backend == "mt5":
+            creds = self.settings.environment.mt5.credentials()
+            if not creds["login"] or not creds["password"]:
+                self.logger.warning("MT5 credentials missing — using paper broker")
+                self._broker = PaperBrokerAdapter(contract_size=self._default_contract_size())
+            else:
+                self._broker = MT5BrokerAdapter(
+                    login=creds["login"],
+                    password=creds["password"],
+                    server=creds["server"],
+                    terminal_path=creds["terminal_path"],
+                    slippage_points=cfg.mt5.slippage_points,
+                    enable_launch=creds["enable_launch"],
+                )
+        else:
+            self._broker = PaperBrokerAdapter(contract_size=self._default_contract_size())
+
+        self.bus.subscribe("signal.approved", self._on_signal_approved)
+        self.bus.subscribe("market.quote", self._on_quote)
+        if self._broker.connect():
+            self.mark_healthy(f"connected ({type(self._broker).__name__})")
+        else:
+            self.mark_unhealthy("broker connection failed")
+
+    async def stop(self) -> None:
+        if self._broker is not None:
+            self._broker.disconnect()
+        await super().stop()
+
+    def _on_quote(self, event: Event) -> None:
+        q = event.payload or {}
+        self._prices[q.get("symbol")] = {"bid": q.get("bid", 0), "ask": q.get("ask", 0)}
+
+    def _default_contract_size(self) -> float:
+        for canonical in self._mapper.canonical_ids():
+            try:
+                return self._mapper.contract_size(canonical)
+            except SymbolMappingError:
+                continue
+        return self.settings.risk.sizing.contract_size
+
+    # ── order routing ─────────────────────────────────────────
+    async def _on_signal_approved(self, event: Event) -> None:
+        payload = event.payload or {}
+        if not self._trading_allowed:
+            self.logger.warning("signal ignored — trading gate closed")
+            await self.bus.publish(
+                Event("trade.rejected", {"error": "trading gate closed (startup validation failed)"})
+            )
+            return
+        signal: Signal = payload["signal"]
+        signal_id = payload.get("signal_id")
+        if self._stage_guard is not None and not self._stage_guard(signal.strategy_id or ""):
+            self.logger.warning(
+                "signal ignored — strategy not approved for environment",
+                extra={"strategy": signal.strategy_id},
+            )
+            await self.bus.publish(
+                Event(
+                    "trade.rejected",
+                    {
+                        "signal_id": signal_id,
+                        "error": "strategy not approved for environment (lifecycle stage)",
+                    },
+                )
+            )
+            return
+        risk = payload.get("risk")
+        if self._broker is None:
+            return
+
+        volume = getattr(risk, "volume", 0.0)
+        risk_amount = getattr(risk, "risk_amount", 0.0)
+        magic = self._magic_for(signal)
+
+        # MT5 speaks the broker symbol; the paper broker accounts in canonical ids.
+        if isinstance(self._broker, MT5BrokerAdapter):
+            try:
+                order_symbol = self._mapper.broker_symbol(signal.symbol)
+            except SymbolMappingError:
+                self.logger.warning(
+                    "signal symbol not in environment map — passing through",
+                    extra={"symbol": signal.symbol},
+                )
+                order_symbol = signal.symbol
+        else:
+            order_symbol = signal.symbol
+
+        result = self._broker.open_market_order(
+            symbol=order_symbol,
+            direction=signal.direction.value,
+            volume=volume,
+            sl=signal.sl,
+            tp=signal.tp,
+            magic=magic,
+        )
+        if not result.success:
+            self.logger.error("order failed", extra={"error": result.error})
+            await self.bus.publish(
+                Event("trade.rejected", {"signal_id": signal_id, "error": result.error})
+            )
+            return
+
+        with self.db.session() as session:
+            record = TradeRecord(
+                signal_id=signal_id,
+                ticket=result.ticket,
+                strategy_id=signal.strategy_id,
+                symbol=signal.symbol,
+                direction=signal.direction.value,
+                volume=volume,
+                entry_price=result.price or 0.0,
+                sl=signal.sl,
+                tp=signal.tp,
+                status=TradeStatus.OPEN.value,
+                risk_amount=risk_amount,
+                deployment_mode=self.settings.base.deployment.mode,
+                pre_trade_confidence=(payload.get("assessment") or {}).get("confidence"),
+            )
+            session.add(record)
+            session.flush()
+            trade_id = record.id
+
+        self.logger.info(
+            "trade opened",
+            extra={"ticket": result.ticket, "trade_id": trade_id,
+                   "direction": signal.direction.value, "volume": volume},
+        )
+        await self.bus.publish(
+            Event(
+                "trade.opened",
+                {"trade_id": trade_id, "ticket": result.ticket, "signal": signal, "volume": volume},
+            )
+        )
+
+    def _magic_for(self, signal: Signal) -> int:
+        for strategy in self.settings.strategies.strategies:
+            if strategy.id == signal.strategy_id:
+                return strategy.order.magic
+        return self.settings.providers.broker.mt5.magic
+
+    # ── monitoring ────────────────────────────────────────────
+    async def tick(self) -> None:
+        if self._broker is None:
+            return
+        try:
+            await self._reconcile_positions()
+            await self.bus.publish(
+                Event("account.updated", {"equity": self._broker.account_equity()})
+            )
+        except Exception:  # noqa: BLE001
+            self.logger.exception("position monitor tick failed")
+
+    async def _reconcile_positions(self) -> None:
+        with self.db.session() as session:
+            open_records = session.query(TradeRecord).filter(
+                TradeRecord.status == TradeStatus.OPEN.value
+            ).all()
+            open_tickets = {r.ticket for r in open_records if r.ticket}
+
+        if not open_tickets:
+            return
+
+        # Paper broker: evaluate TP/SL against live quotes.
+        if isinstance(self._broker, PaperBrokerAdapter):
+            closed = self._broker.check_exits(self._prices)
+            for trade in closed:
+                await self._settle_trade(trade)
+
+        # MT5: detect server-side closes.
+        if isinstance(self._broker, MT5BrokerAdapter):
+            closed_trades = self._broker.closed_trades_since(open_tickets)
+            for trade in closed_trades:
+                await self._settle_trade(trade)
+
+        await self._manage_ict_positions()
+
+    # ── ICT management (Spec V1) ──────────────────────────────
+    async def _manage_ict_positions(self) -> None:
+        """Apply the ICT management rules to open ICT-strategy positions:
+        move SL to breakeven at +1R and exit early on an opposite M5 BOS."""
+        if self._broker is None:
+            return
+        with self.db.session() as session:
+            open_records = session.query(TradeRecord).filter(
+                TradeRecord.status == TradeStatus.OPEN.value
+            ).all()
+
+        for record in open_records:
+            cfg = self._strategy_cfg(record.strategy_id)
+            if cfg is None or cfg.ict is None:
+                continue
+            ict = cfg.ict
+            pos = self._broker_position(record.ticket)
+            if pos is None:
+                continue
+            risk = abs(record.entry_price - (record.sl or record.entry_price))
+            if risk <= 0:
+                continue
+
+            if ict.management.breakeven_at_r and not (record.meta or {}).get("be_triggered"):
+                px = self._price_for(record.symbol)
+                if px is not None:
+                    pnl_r = (px - record.entry_price) / risk if record.direction == "long" \
+                        else (record.entry_price - px) / risk
+                    if pnl_r >= ict.management.breakeven_at_r:
+                        result = self._broker.modify_position(record.ticket, sl=round(record.entry_price, 2))
+                        if result.success:
+                            with self.db.session() as session:
+                                r = session.get(TradeRecord, record.id)
+                                if r:
+                                    r.sl = round(record.entry_price, 2)
+                                    r.meta = {**(r.meta or {}), "be_triggered": True}
+                            self.logger.info("breakeven moved", extra={"ticket": record.ticket})
+
+            if ict.management.early_exit_on_opposite_bos:
+                close_price = self._opposite_bos_close(record)
+                if close_price is None:
+                    continue
+                if isinstance(self._broker, PaperBrokerAdapter):
+                    trade = self._broker.close_position_trade(
+                        record.ticket, reason="bos", price=close_price
+                    )
+                else:
+                    result = self._broker.close_position(record.ticket)
+                    trade = self._closed_trade(record, close_price, "bos") if result.success else None
+                if trade is not None:
+                    await self._settle_trade(trade)
+
+    def _strategy_cfg(self, strategy_id: str | None):
+        if strategy_id is None:
+            return None
+        for s in self.settings.strategies.strategies:
+            if s.id == strategy_id:
+                return s
+        return None
+
+    def _broker_position(self, ticket: str):
+        if self._broker is None:
+            return None
+        for pos in self._broker.get_positions():
+            if pos.ticket == ticket:
+                return pos
+        return None
+
+    def _price_for(self, symbol: str) -> float | None:
+        px = self._prices.get(symbol)
+        if not px:
+            return None
+        bid, ask = px.get("bid", 0.0), px.get("ask", 0.0)
+        if bid and ask:
+            return (bid + ask) / 2.0
+        return bid or ask or None
+
+    def _opposite_bos_close(self, record) -> float | None:
+        """Close price of the M5 candle that broke structure against the trade."""
+        from mercury.core.validation import Candle
+        from mercury.services.data.historical import load_history_from_db
+        from mercury.services.strategy import indicators as ind
+
+        rows = load_history_from_db(self.db, record.symbol, "M5", count=400)
+        if not rows:
+            return None
+        candles = [Candle.model_validate(r) for r in rows]
+        candles = [c for c in candles if c.time >= record.opened_at]
+        if len(candles) < 10:
+            return None
+        idx = ind.detect_opposite_bos(candles, record.direction)
+        if idx is None:
+            return None
+        return candles[idx].close
+
+    def _closed_trade(self, record, price: float, reason: str) -> ClosedTrade:
+        direction = 1 if record.direction == "long" else -1
+        try:
+            contract_size = self._mapper.contract_size(record.symbol)
+        except SymbolMappingError:
+            contract_size = self.settings.risk.sizing.contract_size
+        pnl = direction * (price - record.entry_price) * contract_size * record.volume
+        return ClosedTrade(
+            ticket=record.ticket,
+            symbol=record.symbol,
+            direction=record.direction,
+            volume=record.volume,
+            entry=record.entry_price,
+            close_price=round(price, 2),
+            sl=record.sl,
+            tp=record.tp,
+            close_reason=reason,
+            pnl=pnl,
+            opened_at=record.opened_at,
+            closed_at=datetime.now(UTC),
+        )
+
+    async def _settle_trade(self, trade: ClosedTrade) -> None:
+        with self.db.session() as session:
+            record = session.query(TradeRecord).filter(
+                TradeRecord.ticket == trade.ticket, TradeRecord.status == TradeStatus.OPEN.value
+            ).first()
+            if record is None:
+                return
+            record.status = TradeStatus.CLOSED.value
+            record.closed_at = trade.closed_at
+            record.close_price = trade.close_price
+            record.close_reason = trade.close_reason
+            record.pnl = trade.pnl
+            if record.risk_amount and record.risk_amount > 0:
+                record.pnl_r = trade.pnl / record.risk_amount
+            record.meta = {**(record.meta or {}), "closed_by": "monitor"}
+            session.flush()
+            trade_id = record.id
+
+        self.logger.info(
+            "trade closed",
+            extra={"ticket": trade.ticket, "reason": trade.close_reason, "pnl": trade.pnl},
+        )
+        await self.bus.publish(
+            Event("trade.closed", {"trade_id": trade_id, "ticket": trade.ticket, "trade": trade})
+        )
