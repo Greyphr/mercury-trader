@@ -19,7 +19,7 @@ sizing:
 
 # Hard guards — a signal failing any guard is rejected.
 guards:
-  max_open_positions: 1
+  max_open_positions: 5
   max_daily_trades: 5
   max_daily_drawdown_percent: 3.0      # stop opening new trades for the day
   max_total_drawdown_percent: 8.0      # kill-switch level (halts all trading)

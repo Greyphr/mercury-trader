@@ -142,7 +142,7 @@ class SizingConfig(BaseModel):
 
 
 class RiskGuards(BaseModel):
-    max_open_positions: int = 1
+    max_open_positions: int = 5
     max_daily_trades: int = 5
     max_daily_drawdown_percent: float = 3.0
     max_total_drawdown_percent: float = 8.0

@@ -7,6 +7,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import func, select
+
 from mercury.core.events import Event
 from mercury.core.symbols import SymbolMappingError, get_symbol_mapper
 from mercury.models.orm import TradeRecord
@@ -128,6 +130,22 @@ class ExecutionService(BackgroundService):
                 )
             )
             return
+        max_open = self.settings.risk.guards.max_open_positions
+        if max_open and self._open_positions_count() >= max_open:
+            self.logger.warning(
+                "signal rejected — max open positions reached",
+                extra={"max": max_open},
+            )
+            await self.bus.publish(
+                Event(
+                    "trade.rejected",
+                    {
+                        "signal_id": signal_id,
+                        "error": f"max open positions reached ({max_open})",
+                    },
+                )
+            )
+            return
         risk = payload.get("risk")
         if self._broker is None:
             return
@@ -201,6 +219,17 @@ class ExecutionService(BackgroundService):
             if strategy.id == signal.strategy_id:
                 return strategy.order.magic
         return self.settings.providers.broker.mt5.magic
+
+    def _open_positions_count(self) -> int:
+        with self.db.session() as session:
+            return int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(TradeRecord)
+                    .where(TradeRecord.status == TradeStatus.OPEN.value)
+                )
+                or 0
+            )
 
     # ── monitoring ────────────────────────────────────────────
     async def tick(self) -> None:
