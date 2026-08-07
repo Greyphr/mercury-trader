@@ -284,12 +284,16 @@ class ExecutionService(BackgroundService):
     async def _reconcile_with_broker(self, *, record_for_gate: bool = False) -> None:
         """Compare broker-open positions against OPEN TradeRecords.
 
-        - Broker position with no matching record (orphan): alert via
-          ``system.critical``; when ``record_for_gate`` (startup pass) the issue
-          is surfaced to the startup validation gate so trading is blocked.
+        - Broker position with no matching record (orphan): alert via a single
+          batched ``system.critical`` summary (not one event per ticket); when
+          ``record_for_gate`` (startup pass) the issue is surfaced to the
+          startup validation gate so trading is blocked.
         - OPEN record with no broker position: settle from the broker's trade
           history if the close is known, otherwise flag it ``MANUAL_REVIEW``
           (no PnL guessing).
+
+        Per-ticket detail is always logged at ``critical`` level; only the
+        fan-out to the event bus is collapsed into one summary event.
         """
         if self._broker is None:
             return
@@ -302,35 +306,73 @@ class ExecutionService(BackgroundService):
             db_tickets = {r.ticket for r in open_records if r.ticket}
 
         orphan_tickets = broker_tickets - db_tickets
-        for ticket in orphan_tickets:
-            self._report_orphan(ticket, record_for_gate=record_for_gate)
+        orphan_details = [
+            detail
+            for ticket in orphan_tickets
+            if (detail := self._report_orphan(ticket, record_for_gate=record_for_gate))
+        ]
 
+        missing_details: list[str] = []
         missing_tickets = db_tickets - broker_tickets
         for record in open_records:
             if record.ticket and record.ticket in missing_tickets:
-                await self._resolve_missing_position(record, record_for_gate=record_for_gate)
+                detail = await self._resolve_missing_position(
+                    record, record_for_gate=record_for_gate, publish=False
+                )
+                if detail:
+                    missing_details.append(detail)
 
         # Drop reports for orphans that resolved, so a recurrence re-alerts.
         self._reported_orphans &= orphan_tickets
 
-    def _report_orphan(self, ticket: str, *, record_for_gate: bool) -> None:
+        if orphan_details or missing_details:
+            self.bus.publish_nowait(
+                Event(
+                    "system.critical",
+                    {"error": self._reconciliation_summary(orphan_details, missing_details)},
+                )
+            )
+
+    @staticmethod
+    def _reconciliation_summary(orphan_details: list[str], missing_details: list[str]) -> str:
+        """Collapse per-item reconciliation alerts into one critical message."""
+        counts = []
+        if orphan_details:
+            counts.append(f"{len(orphan_details)} orphaned broker position(s) with no TradeRecord")
+        if missing_details:
+            counts.append(f"{len(missing_details)} open record(s) with no broker match (manual review)")
+        lines = [f"Reconciliation: {', '.join(counts)}."]
+        lines.extend(orphan_details)
+        lines.extend(missing_details)
+        return "\n".join(lines)
+
+    def _report_orphan(self, ticket: str, *, record_for_gate: bool) -> str | None:
         detail = (
             f"broker position {ticket} has no matching TradeRecord — "
             "reconcile or close it before trading"
         )
-        if ticket not in self._reported_orphans:
+        alert = ticket not in self._reported_orphans
+        if alert:
             self._reported_orphans.add(ticket)
             self.logger.critical("orphaned broker position", extra={"ticket": ticket})
-            self.bus.publish_nowait(Event("system.critical", {"error": detail}))
         if record_for_gate and detail not in self._startup_reconcile_issues:
             self._startup_reconcile_issues.append(detail)
+        return detail if alert else None
 
-    async def _resolve_missing_position(self, record, *, record_for_gate: bool) -> None:
-        """An OPEN record whose ticket is gone from the broker."""
+    async def _resolve_missing_position(
+        self, record, *, record_for_gate: bool, publish: bool = True
+    ) -> str | None:
+        """An OPEN record whose ticket is gone from the broker.
+
+        Flags the record ``MANUAL_REVIEW`` and returns the alert detail.
+        ``publish`` controls whether a per-record ``system.critical`` event is
+        emitted: ad hoc calls keep it, while the batched reconcile path
+        suppresses it in favor of a single summary event.
+        """
         closed = self._broker.closed_trades_since({record.ticket})
         if closed:
             await self._settle_trade(next(c for c in closed if c.ticket == record.ticket))
-            return
+            return None
 
         detail = (
             f"open TradeRecord {record.ticket} ({record.symbol}) has no broker position "
@@ -339,7 +381,7 @@ class ExecutionService(BackgroundService):
         with self.db.session() as session:
             current = session.get(TradeRecord, record.id)
             if current is None or current.status != TradeStatus.OPEN.value:
-                return
+                return None
             current.status = TradeStatus.MANUAL_REVIEW.value
             current.meta = {
                 **(current.meta or {}),
@@ -349,9 +391,11 @@ class ExecutionService(BackgroundService):
             session.flush()
         self.logger.critical("open trade missing at broker — manual review required",
                              extra={"ticket": record.ticket, "symbol": record.symbol})
-        self.bus.publish_nowait(Event("system.critical", {"error": detail}))
+        if publish:
+            self.bus.publish_nowait(Event("system.critical", {"error": detail}))
         if record_for_gate and detail not in self._startup_reconcile_issues:
             self._startup_reconcile_issues.append(detail)
+        return detail
 
     async def _reconcile_positions(self) -> None:
         with self.db.session() as session:

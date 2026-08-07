@@ -157,3 +157,50 @@ async def test_open_record_missing_at_broker_settles_from_history(settings, db):
         assert record.pnl == -10.0
         assert (record.meta or {}).get("closed_by") == "monitor"
     await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_batches_multiple_issues_into_one_critical(settings, db):
+    bus = EventBus()
+    critical: list[Event] = []
+    bus.subscribe("system.critical", lambda e: critical.append(e))
+
+    svc = ExecutionService(bus=bus, settings=settings, db=db)
+    await svc.start()
+    t1 = _orphan_seed(svc._broker)
+    t2 = _orphan_seed(svc._broker)
+    ghost_id = _open_record(db, "ghost-1")
+
+    await svc._reconcile_with_broker()
+
+    assert len(critical) == 1
+    summary = critical[0].payload["error"]
+    assert "2 orphaned broker position(s)" in summary
+    assert "1 open record(s) with no broker match" in summary
+    assert t1 in summary and t2 in summary
+    assert "ghost-1" in summary
+
+    with db.session() as session:
+        record = session.get(TradeRecord, ghost_id)
+        assert record.status == TradeStatus.MANUAL_REVIEW.value
+    await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_resolve_missing_position_ad_hoc_publishes_per_record(settings, db):
+    bus = EventBus()
+    critical: list[Event] = []
+    bus.subscribe("system.critical", lambda e: critical.append(e))
+
+    svc = ExecutionService(bus=bus, settings=settings, db=db)
+    await svc.start()
+    record_id = _open_record(db, "ghost-2")
+    with db.session() as session:
+        record = session.get(TradeRecord, record_id)
+
+    detail = await svc._resolve_missing_position(record, record_for_gate=False)
+
+    assert detail is not None
+    assert len(critical) == 1
+    assert "manual review" in critical[0].payload["error"]
+    await svc.stop()

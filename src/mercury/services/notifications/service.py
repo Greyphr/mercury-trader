@@ -20,6 +20,7 @@ class NotificationService(Service):
 
     async def start(self) -> None:
         await super().start()
+        self._notifier.start()
         self.bus.subscribe("trade.opened", self._on_trade_opened)
         self.bus.subscribe("trade.closed", self._on_trade_closed)
         self.bus.subscribe("trade.rejected", self._on_trade_rejected)
@@ -28,6 +29,10 @@ class NotificationService(Service):
         self.bus.subscribe("strategy.promoted", self._on_strategy_promoted)
         self.bus.subscribe("system.critical", self._on_critical)
         self.mark_healthy(f"notifier: {self._notifier.name}")
+
+    async def stop(self) -> None:
+        await self._notifier.close()
+        await super().stop()
 
     # ── event handlers ────────────────────────────────────────
     async def _on_trade_opened(self, event: Event) -> None:
