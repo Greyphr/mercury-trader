@@ -60,10 +60,29 @@ class StrategyEngineService(Service):
         self._candles[(symbol, timeframe)] = parsed
 
         closed = parsed[:-1] if len(parsed) > 1 else parsed
+        if not closed:
+            return
+        # generate_signals scans the full history and returns every historical
+        # match (required for backtesting); only the newest closed candle's
+        # signals are live. Drop anything older so a stale setup can't trigger
+        # a real trade.
+        newest_closed_time = closed[-1].time.isoformat()
         for strategy in self._strategies:
             if strategy.config.symbol != symbol or strategy.config.timeframe != timeframe:
                 continue
             for signal in strategy.generate_signals(closed):
+                if signal.meta.get("candle_time") != newest_closed_time:
+                    self.logger.debug(
+                        "dropping stale signal — not from newest closed candle",
+                        extra={
+                            "strategy": signal.strategy_id,
+                            "symbol": signal.symbol,
+                            "direction": signal.direction.value,
+                            "candle_time": signal.meta.get("candle_time"),
+                            "newest_closed_time": newest_closed_time,
+                        },
+                    )
+                    continue
                 self._emit(signal)
 
     def _emit(self, signal: Signal) -> None:
