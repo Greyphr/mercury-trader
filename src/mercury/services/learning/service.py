@@ -21,6 +21,10 @@ from mercury.models.schemas import ProposalStatus
 from mercury.services.base import Service
 
 
+class UnknownTargetStrategyError(Exception):
+    """Raised when a proposal names a strategy id that is not configured."""
+
+
 class LearningService(Service):
     name = "learning"
 
@@ -91,7 +95,12 @@ class LearningService(Service):
                 return
             proposal.status = ProposalStatus.BACKTESTING.value
             cfg_merge = proposal.proposed_config or {}
-            strategy_cfg = self._merge_strategy_config(cfg_merge)
+            try:
+                strategy_cfg = self._merge_strategy_config(proposal.target_strategy_id, cfg_merge)
+            except UnknownTargetStrategyError as exc:
+                proposal.status = ProposalStatus.REJECTED.value
+                proposal.review_notes = str(exc)
+                return
             symbol = strategy_cfg.symbol
             timeframe = strategy_cfg.timeframe
 
@@ -145,9 +154,24 @@ class LearningService(Service):
             Event("hermes.proposal.backtested", {"proposal_id": proposal_id, "passed": passed, "summary": summary})
         )
 
-    def _merge_strategy_config(self, overrides: dict[str, Any]) -> Any:
-        """Start from the current strategy config and apply proposal overrides."""
-        base = self.settings.strategies.strategies[0]
+    def _merge_strategy_config(self, target_strategy_id: str | None, overrides: dict[str, Any]) -> Any:
+        """Start from the proposal's target strategy config and apply overrides.
+
+        The base strategy is resolved by id (the proposal's ``target_strategy_id``
+        column, falling back to ``proposed_config.id``) rather than by list
+        position, so a proposal is never merged onto the wrong strategy's config.
+        """
+        sid = target_strategy_id or overrides.get("id")
+        base = None
+        for strategy in self.settings.strategies.strategies:
+            if strategy.id == sid:
+                base = strategy
+                break
+        if base is None:
+            available = ", ".join(s.id for s in self.settings.strategies.strategies)
+            raise UnknownTargetStrategyError(
+                f"proposal targets unknown strategy {sid!r} — rejected (available: {available})"
+            )
         data = base.model_dump()
         deep_merge(data, overrides)
         from mercury.core.config import StrategyConfig
@@ -173,7 +197,9 @@ class LearningService(Service):
     def _new_version(session, proposal: ProposalRecord, stage: str) -> None:
         from sqlalchemy import func
 
-        strategy_id = proposal.proposed_config.get("id", "xauusd_m5_trend")
+        strategy_id = proposal.target_strategy_id or proposal.proposed_config.get("id")
+        if not strategy_id:
+            raise UnknownTargetStrategyError("proposal has no target strategy id")
         version = (
             session.scalar(
                 select(func.max(StrategyVersionRecord.version)).where(

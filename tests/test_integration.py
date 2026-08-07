@@ -18,6 +18,9 @@ def integration_settings(tmp_path):
     settings.base.deployment.mode = "paper"
     settings.risk.guards.session_check = False
     settings.risk.guards.news_blackout_minutes = 0
+    # Hermes is rule-based in the test env (no LLM); the operator flag must be
+    # on for rule-based-assessed signals to pass the confidence gate.
+    settings.risk.guards.allow_rule_based_trading = True
     settings.providers.signal.providers = ["internal"]  # skip webhook server
     return settings
 
@@ -27,6 +30,11 @@ async def test_signal_flows_to_open_trade(integration_settings):
     orch = MercuryOrchestrator(settings=integration_settings)
     await orch.start()
     try:
+        # Stream a live quote first (the collector publishes these every poll);
+        # the paper broker refuses to fill without a real price.
+        await orch.bus.publish(
+            Event("market.quote", {"symbol": "GOLD", "bid": 2399.0, "ask": 2401.0})
+        )
         signal = Signal(
             provider=SignalSource.INTERNAL_STRATEGY,
             strategy_id="xauusd_m5_trend",

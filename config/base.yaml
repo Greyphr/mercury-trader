@@ -18,6 +18,17 @@ environment: development
 
 timezone: UTC
 
+# Event topics recorded to the durable audit log (event_audit table).
+events:
+  audit_topics:
+    - trade.opened
+    - trade.closed
+    - trade.rejected
+    - signal.approved
+    - signal.rejected
+    - hermes.proposals
+    - system.critical
+
 # Internal job cadences (seconds between runs)
 jobs:
   market_data: 60          # poll/refresh candles

@@ -12,6 +12,7 @@ max_risk_per_trade_percent: 1.0
 sizing:
   mode: fixed_percent        # fixed_percent | adaptive
   fixed_percent: 0.5
+  max_volume: 10000          # hard cap on lots per order (XAUUSD broker max is 200; widened for now)
   adaptive:
     enabled: false
     # Multiply fixed % by Hermes confidence discount (0.5..1.0).
@@ -27,6 +28,7 @@ guards:
   max_spread_points: 30
   session_check: true                  # only trade inside configured sessions
   min_confidence: 0.55                 # Hermes pre-trade confidence gate
+  allow_rule_based_trading: false      # degraded/rule-based assessments rejected unless explicitly enabled
   news_blackout_minutes: 15            # no entries 15 min before/after major news (NFP/CPI/FOMC)
   max_slippage_points: 20
 

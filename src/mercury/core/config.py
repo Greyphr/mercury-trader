@@ -88,6 +88,20 @@ class PathsConfig(BaseModel):
     log_dir: str = "logs"
 
 
+class EventAuditConfig(BaseModel):
+    """Topics recorded to the durable event audit log (``event_audit`` table)."""
+
+    audit_topics: list[str] = Field(default_factory=lambda: [
+        "trade.opened",
+        "trade.closed",
+        "trade.rejected",
+        "signal.approved",
+        "signal.rejected",
+        "hermes.proposals",
+        "system.critical",
+    ])
+
+
 class BaseConfig(BaseModel):
     project: ProjectConfig = ProjectConfig()
     deployment: DeploymentConfig = DeploymentConfig()
@@ -96,6 +110,7 @@ class BaseConfig(BaseModel):
     jobs: JobsConfig = JobsConfig()
     trading_sessions: list[TradingSession] = Field(default_factory=list)
     paths: PathsConfig = PathsConfig()
+    events: EventAuditConfig = EventAuditConfig()
 
 
 # ── trading_criteria.yaml ─────────────────────────────────────
@@ -138,6 +153,7 @@ class SizingConfig(BaseModel):
     mode: Literal["fixed_percent", "adaptive"] = "fixed_percent"
     fixed_percent: float = 0.5
     contract_size: float = 100.0  # units of the underlying per 1.0 lot (XAUUSD = 100 oz)
+    max_volume: float = 10_000.0  # hard cap on lots per order; sizing rejects above this
     adaptive: AdaptiveSizing = AdaptiveSizing()
 
 
@@ -150,6 +166,7 @@ class RiskGuards(BaseModel):
     max_spread_points: int = 30
     session_check: bool = True
     min_confidence: float = 0.55
+    allow_rule_based_trading: bool = False
     news_blackout_minutes: int = 5
     max_slippage_points: int = 20
 
@@ -324,7 +341,7 @@ class EnvironmentConfig(BaseModel):
     name: str = ""
     description: str = ""
     broker_backend: Literal["mt5", "paper"] = "paper"
-    trading_enabled: bool = True
+    trading_enabled: bool = False
     mt5: MT5EnvironmentConfig = MT5EnvironmentConfig()
     symbols: dict[str, InstrumentContract] = Field(default_factory=dict)
     database_url: str | None = None     # full override (takes precedence over database_name)
@@ -463,6 +480,21 @@ class Settings(BaseModel):
     @property
     def deployment_mode(self) -> str:
         return self.deployment_mode_override or self.base.deployment.mode
+
+
+def redact_database_url(url: str) -> str:
+    """Return a database URL with the password hidden, for logs/stdout.
+
+    Uses SQLAlchemy's URL parser (``render_as_string(hide_password=True)``)
+    so non-default URL shapes are handled correctly. Falls back to the raw
+    string if the URL cannot be parsed.
+    """
+    from sqlalchemy.engine import make_url
+
+    try:
+        return make_url(url).render_as_string(hide_password=True)
+    except Exception:  # noqa: BLE001
+        return url
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

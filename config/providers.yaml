@@ -66,4 +66,6 @@ signal:
   webhook:
     host: 0.0.0.0
     port: 9100                 # from SIGNAL_WEBHOOK_PORT
+    # REQUIRED when deployment.mode is live (from SIGNAL_WEBHOOK_SECRET);
+    # without it the server refuses to start / the startup gate blocks trading.
     secret: ""                 # from SIGNAL_WEBHOOK_SECRET

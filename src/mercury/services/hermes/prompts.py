@@ -87,6 +87,7 @@ DAILY_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "target_strategy_id": {"type": "string"},
                     "hypothesis": {"type": "string"},
                     "description": {"type": "string"},
                     "proposed_config": {"type": "object"},
@@ -132,12 +133,16 @@ def post_trade_user_prompt(trade: dict, market_context: dict, historical_context
     )
 
 
-def daily_user_prompt(summary_stats: dict, recent_trades: list, news: list) -> str:
+def daily_user_prompt(summary_stats: dict, recent_trades: list, news: list, strategy_ids: list[str]) -> str:
     return (
         "Analyze the last 24h of the trading system and return your analysis as JSON.\n\n"
         f"Performance summary: {summary_stats}\n"
         f"Recent trades: {recent_trades}\n"
         f"Recent news/sentiment: {news}\n\n"
         "Compare winning vs losing trades, identify recurring patterns and "
-        "weaknesses, and propose improvements (each must be testable via backtest)."
+        "weaknesses, and propose improvements (each must be testable via backtest).\n\n"
+        "Each proposal must set 'target_strategy_id' to exactly one of the "
+        f"available strategy ids: {strategy_ids}.\n"
+        "The 'proposed_config' should only contain the fields being changed for "
+        "that strategy; leave unmentioned fields out so the current config is kept."
     )

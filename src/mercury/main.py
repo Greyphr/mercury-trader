@@ -22,6 +22,10 @@ import argparse
 import json
 import sys
 
+from mercury.core.logging import get_logger
+
+logger = get_logger("cli")
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mercury", description="Mercury Trader bot/agent")
@@ -75,7 +79,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "health":
-        from mercury.core.config import load_config
+        from mercury.core.config import load_config, redact_database_url
 
         settings = load_config(environment=args.env)
         env = settings.environment
@@ -84,7 +88,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"environment: {env.name} ({env.description})")
         print(f"trading enabled: {env.trading_enabled}")
         print(f"symbol map: {[f'{c} -> {s.broker_symbol}' for c, s in env.symbols.items()]}")
-        print(f"database: {settings.database_url}")
+        print(f"database: {redact_database_url(settings.database_url)}")
         print(f"log dir: {settings.base.paths.log_dir}")
         print(f"broker backend: {settings.providers.broker.backend}")
         print(f"llm mode: {settings.providers.llm.mode}")
@@ -108,7 +112,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "approve":
-        _cli_approve(db, args)
+        _cli_approve(db, settings, args)
         return
 
     if args.command == "kill-switch":
@@ -135,6 +139,7 @@ def _cli_backtest(settings, db, args) -> None:
 
     strategy_cfg = next((s for s in settings.strategies.strategies if s.id == args.strategy), None)
     if strategy_cfg is None:
+        logger.error("strategy not found", extra={"strategy": args.strategy})
         print(f"strategy not found: {args.strategy}")
         sys.exit(1)
     candles_raw = load_history(settings, strategy_cfg.symbol, strategy_cfg.timeframe, count=args.bars)
@@ -162,30 +167,34 @@ def _cli_proposals(db, args) -> None:
             print(f"#{p.id} [{p.status}] {p.hypothesis[:80]}")
 
 
-def _cli_approve(db, args) -> None:
+def _cli_approve(db, settings, args) -> None:
+    from mercury.core.events import EventBus
     from mercury.services.learning.service import LearningService
 
-    svc = LearningService(bus=None, settings=None, db=db)  # type: ignore[arg-type]
+    svc = LearningService(bus=EventBus(), settings=settings, db=db)
     stage = "live" if args.live else "paper"
     if svc.approve_proposal(args.proposal_id, stage=stage):
         print(f"proposal #{args.proposal_id} approved for {stage}")
     else:
+        logger.error("proposal not found or not awaiting approval", extra={"proposal_id": args.proposal_id})
         print(f"proposal #{args.proposal_id} not found or not awaiting approval")
         sys.exit(1)
 
 
 def _cli_kill_switch(db, settings, args) -> None:
+    from mercury.core.events import EventBus
     from mercury.services.risk.service import RiskManagerService
 
-    svc = RiskManagerService(bus=None, settings=settings, db=db)  # type: ignore[arg-type]
+    svc = RiskManagerService(bus=EventBus(), settings=settings, db=db)
     svc.set_kill_switch(args.state == "on")
     print(f"kill switch: {args.state}")
 
 
 def _promotion_service(db, settings):
+    from mercury.core.events import EventBus
     from mercury.services.promotion.service import PromotionService
 
-    return PromotionService(bus=None, settings=settings, db=db)  # type: ignore[arg-type]
+    return PromotionService(bus=EventBus(), settings=settings, db=db)
 
 
 def _cli_promote(db, settings, args) -> None:
@@ -203,6 +212,7 @@ def _cli_promote(db, settings, args) -> None:
             check_gates=args.check_gates,
         )
     except (PromotionError, ValueError) as exc:
+        logger.error("promotion failed", extra={"strategy": args.strategy_id, "error": str(exc)})
         print(f"error: {exc}")
         sys.exit(1)
     print(f"{args.strategy_id}: {svc.get_stage(args.strategy_id).value}")
@@ -215,6 +225,7 @@ def _cli_demote(db, settings, args) -> None:
     try:
         svc.demote(args.strategy_id, args.to, actor=args.actor, reason=args.reason)
     except (PromotionError, ValueError) as exc:
+        logger.error("demotion failed", extra={"strategy": args.strategy_id, "error": str(exc)})
         print(f"error: {exc}")
         sys.exit(1)
     print(f"{args.strategy_id}: {svc.get_stage(args.strategy_id).value}")

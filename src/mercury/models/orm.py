@@ -127,6 +127,7 @@ class ProposalRecord(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source: Mapped[str] = mapped_column(String(32), default="hermes")
+    target_strategy_id: Mapped[str | None] = mapped_column(String(64), index=True)
     hypothesis: Mapped[str] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text, default="")
     proposed_config: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -222,4 +223,19 @@ class StrategyPromotionRecord(Base):
     actor: Mapped[str] = mapped_column(String(64))
     reason: Mapped[str] = mapped_column(String(512), default="")
     metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventRecord(Base):
+    """Durable audit log of allowlisted events dispatched on the bus.
+
+    Written before handlers run so a crash mid-dispatch still leaves a record
+    of what was published. Payload is stored as JSON (best-effort coercion)."""
+
+    __tablename__ = "event_audit"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    topic: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

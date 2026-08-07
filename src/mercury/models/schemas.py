@@ -31,6 +31,7 @@ class TradeStatus(StrEnum):
     CLOSED = "closed"
     CANCELLED = "cancelled"
     REJECTED = "rejected"
+    MANUAL_REVIEW = "manual_review"
 
 
 class CloseReason(StrEnum):

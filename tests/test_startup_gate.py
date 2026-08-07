@@ -34,6 +34,7 @@ class FakeProvider:
 class FakeExecution:
     def __init__(self, broker: FakeBroker) -> None:
         self.broker = broker
+        self.startup_reconcile_issues: list[str] = []
 
 
 class FakeCollector:
@@ -111,6 +112,33 @@ def test_gate_blocks_live_without_notifications(db, monkeypatch):
     gate.run()
     assert gate.passed is False
     assert check(gate, "notifications").ok is False
+
+
+def test_gate_blocks_live_without_webhook_secret(db, monkeypatch):
+    monkeypatch.delenv("SIGNAL_WEBHOOK_SECRET", raising=False)
+    settings = load_config()
+    settings.base.deployment.mode = "live"
+    gate = build_gate(settings, db)
+    gate.run()
+    assert gate.passed is False
+    assert check(gate, "webhook_secret").ok is False
+
+
+def test_gate_webhook_secret_passes_in_live_when_set(db, monkeypatch):
+    monkeypatch.setenv("SIGNAL_WEBHOOK_SECRET", "s3cret")
+    settings = load_config()
+    settings.base.deployment.mode = "live"
+    gate = build_gate(settings, db)
+    gate.run()
+    assert check(gate, "webhook_secret").ok is True
+
+
+def test_gate_webhook_secret_not_required_outside_live(settings, db):
+    gate = build_gate(settings, db)
+    gate.run()
+    result = check(gate, "webhook_secret")
+    assert result.ok is True
+    assert result.relevant is False
 
 
 def test_gate_blocks_on_bad_risk_config(settings, db):

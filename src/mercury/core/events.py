@@ -16,6 +16,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from mercury.core.logging import get_logger
@@ -23,6 +24,26 @@ from mercury.core.logging import get_logger
 logger = get_logger("core.events")
 
 Handler = Callable[[Any], Any]
+
+_JSON_SAFE = (int, float, str, bool, type(None))
+
+
+def _jsonable(obj: Any) -> Any:
+    """Coerce arbitrary event payloads into JSON-safe primitives."""
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, _JSON_SAFE):
+        return obj
+    if hasattr(obj, "model_dump"):
+        return _jsonable(obj.model_dump(mode="json"))
+    try:
+        return _jsonable(vars(obj))
+    except TypeError:
+        return str(obj)
 
 
 @dataclass(slots=True)
@@ -40,12 +61,19 @@ class EventBus:
     - ``publish`` (async) awaits handlers.
     - ``publish_nowait`` schedules handlers without awaiting (fire-and-forget).
     - Handlers may be sync or async; exceptions are logged, never propagated.
+
+    When a ``db`` and ``audit_topics`` are supplied, allowlisted events are
+    written to the ``event_audit`` table before dispatch so a crash
+    mid-dispatch still leaves a record. Audit writes are best-effort and never
+    affect dispatch.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, db: Any = None, audit_topics: tuple[str, ...] | list[str] = ()) -> None:
         self._subscribers: dict[str, list[Handler]] = defaultdict(list)
         self._wildcard: list[Handler] = []
         self._lock = threading.RLock()
+        self._db = db
+        self._audit_topics = set(audit_topics)
 
     # ── subscription ──────────────────────────────────────────
     def subscribe(self, topic: str, handler: Handler) -> None:
@@ -69,14 +97,34 @@ class EventBus:
         with self._lock:
             return [*self._wildcard, *self._subscribers.get(topic, [])]
 
+    def _audit(self, event: Event) -> None:
+        """Persist allowlisted events to the audit log (best-effort)."""
+        if self._db is None or event.topic not in self._audit_topics:
+            return
+        from mercury.models.orm import EventRecord
+
+        try:
+            with self._db.session() as session:
+                session.add(
+                    EventRecord(
+                        topic=event.topic,
+                        payload=_jsonable(event.payload),
+                        occurred_at=event.occurred_at,
+                    )
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("event audit write failed", extra={"topic": event.topic}, exc_info=True)
+
     async def publish(self, event: Event) -> None:
         """Dispatch to all handlers, awaiting async ones."""
+        self._audit(event)
         handlers = self._handlers_for(event.topic)
         for handler in handlers:
             await self._invoke(handler, event)
 
     def publish_nowait(self, event: Event) -> None:
         """Fire-and-forget dispatch; async handlers scheduled on the loop."""
+        self._audit(event)
         handlers = self._handlers_for(event.topic)
         loop = _current_or_running_loop()
         for handler in handlers:

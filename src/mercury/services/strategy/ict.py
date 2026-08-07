@@ -399,6 +399,7 @@ class ICTStrategy(Strategy):
         self._provider = context_provider
         self._settings = settings
         self._signals: list[Signal] = []
+        self._h1_snapshots: dict[datetime, H1Snapshot] = {}
 
     @property
     def sessions(self) -> list[TradingSession]:
@@ -432,6 +433,7 @@ class ICTStrategy(Strategy):
         h4_snap: H4Snapshot | None = None
         prev_h1 = -1
         prev_h4 = -1
+        used_h1_keys: set[datetime] = set()
 
         def build_signal(direction: str, setup: _Setup, plus_one: dict, candle: Candle,
                          atr_val: float) -> Signal | None:
@@ -445,7 +447,9 @@ class ICTStrategy(Strategy):
             hi = bisect_right(h1_times, t - timedelta(hours=1))
             h4i = bisect_right(h4_times, t - timedelta(hours=4))
             if hi != prev_h1:
-                h1_snap = build_h1_snapshot(h1[:hi], ict)
+                h1_snap = self._h1_snapshot(h1[:hi], ict)
+                if h1_snap is not None:
+                    used_h1_keys.add(h1[hi - 1].time)
                 prev_h1 = hi
             if h4i != prev_h4:
                 h4_snap = build_h4_snapshot(h4[:h4i], ict)
@@ -453,7 +457,27 @@ class ICTStrategy(Strategy):
             if h1_snap is None or h4_snap is None:
                 continue
             tracker.advance(candle, atr_m5[i], h1_snap, h4_snap, self.sessions, build_signal)
+        self._h1_snapshots = {k: v for k, v in self._h1_snapshots.items() if k in used_h1_keys}
         return self._signals
+
+    def _h1_snapshot(self, prefix: list[Candle], ict: ICTConfig) -> H1Snapshot | None:
+        """Build (or reuse) the H1 snapshot for a prefix of closed H1 candles.
+
+        The snapshot — fractal swings, BOS, order blocks, liquidity, and
+        ``detect_trendlines`` — is a pure function of the H1 prefix, which only
+        changes once per H1 candle close. Memoizing by the prefix's last candle
+        time means the M5 replay on every ``market.data.updated`` tick (60s)
+        reuses prior work instead of recomputing on unchanged H1 data.
+        """
+        if not prefix:
+            return None
+        key = prefix[-1].time
+        cached = self._h1_snapshots.get(key)
+        if cached is None:
+            cached = build_h1_snapshot(prefix, ict)
+            if cached is not None:
+                self._h1_snapshots[key] = cached
+        return cached
 
     def _build_signal(self, direction: str, setup: _Setup, plus_one: dict, candle: Candle,
                       atr_val: float, h1: H1Snapshot | None, h4: H4Snapshot | None,

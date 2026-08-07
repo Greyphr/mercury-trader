@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -55,6 +56,10 @@ def _approved_event(signal_id):
             "risk": SimpleNamespace(volume=0.01, risk_amount=5.0),
         },
     )
+
+
+def _seed_quote(svc):
+    svc._on_quote(Event("market.quote", {"symbol": "GOLD", "bid": 2399.0, "ask": 2401.0}))
 
 
 def test_max_open_positions_defaults_to_five():
@@ -118,6 +123,7 @@ async def test_execution_opens_when_below_limit(settings, db):
     bus = EventBus()
     svc = ExecutionService(bus=bus, settings=settings, db=db)
     await svc.start()
+    _seed_quote(svc)
 
     opened: list[Event] = []
     bus.subscribe("trade.opened", lambda e: opened.append(e))
@@ -138,6 +144,7 @@ async def test_execution_hard_cap_applies_after_limit_then_allows_when_closed(se
     bus = EventBus()
     svc = ExecutionService(bus=bus, settings=settings, db=db)
     await svc.start()
+    _seed_quote(svc)
 
     rejected: list[Event] = []
     bus.subscribe("trade.rejected", lambda e: rejected.append(e))
@@ -158,3 +165,31 @@ async def test_execution_hard_cap_applies_after_limit_then_allows_when_closed(se
     assert len([t for t in trades if t.status == TradeStatus.OPEN.value]) == 5
     assert rejected == []
     await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approved_signals_respect_max_open(tmp_path, settings):
+    from mercury.core.db import Database
+
+    database = Database(f"sqlite:///{tmp_path / 'open_limit.db'}")
+    database.create_tables()
+    bus = EventBus()
+    svc = ExecutionService(bus=bus, settings=settings, db=database)
+    await svc.start()
+    _seed_quote(svc)
+
+    max_open = settings.risk.guards.max_open_positions
+    assert max_open >= 2
+
+    def run_signal(signal_id):
+        asyncio.run(svc._on_signal_approved(_approved_event(signal_id)))
+
+    await asyncio.gather(*(asyncio.to_thread(run_signal, i) for i in range(max_open + 1)))
+
+    with database.session() as session:
+        trades = session.query(TradeRecord).all()
+    assert len(trades) == max_open
+    assert all(t.status == TradeStatus.OPEN.value for t in trades)
+
+    await svc.stop()
+    database.dispose()

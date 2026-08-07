@@ -3,15 +3,17 @@ and monitors open positions (TP/SL detection, MT5 server-side closes)."""
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from mercury.core.events import Event
 from mercury.core.symbols import SymbolMappingError, get_symbol_mapper
-from mercury.models.orm import TradeRecord
+from mercury.models.orm import SystemStateRecord, TradeRecord
 from mercury.models.schemas import Signal, TradeStatus
 from mercury.services.base import BackgroundService
 from mercury.services.execution.broker import (
@@ -35,11 +37,20 @@ class ExecutionService(BackgroundService):
         self._mapper = get_symbol_mapper(self.settings)
         self._trading_allowed = True
         self._stage_guard: Callable[[str], bool] | None = None
+        self._reported_orphans: set[str] = set()
+        self._startup_reconcile_issues: list[str] = []
+        self._execution_lock = threading.Lock()
         self.poll_interval_seconds = self.settings.base.jobs.price_monitor
 
     @property
     def broker(self) -> BrokerAdapter | None:
         return self._broker
+
+    @property
+    def startup_reconcile_issues(self) -> list[str]:
+        """Position-reconciliation problems found at startup (consumed by the
+        startup validation gate to block trading)."""
+        return list(self._startup_reconcile_issues)
 
     def set_trading_allowed(self, allowed: bool) -> None:
         """Arm/disarm order execution (called by the startup validation gate)."""
@@ -84,6 +95,7 @@ class ExecutionService(BackgroundService):
         self.bus.subscribe("market.quote", self._on_quote)
         if self._broker.connect():
             self.mark_healthy(f"connected ({type(self._broker).__name__})")
+            await self._reconcile_with_broker(record_for_gate=True)
         else:
             self.mark_unhealthy("broker connection failed")
 
@@ -95,6 +107,8 @@ class ExecutionService(BackgroundService):
     def _on_quote(self, event: Event) -> None:
         q = event.payload or {}
         self._prices[q.get("symbol")] = {"bid": q.get("bid", 0), "ask": q.get("ask", 0)}
+        if isinstance(self._broker, PaperBrokerAdapter):
+            self._broker.update_prices(self._prices)
 
     def _default_contract_size(self) -> float:
         for canonical in self._mapper.canonical_ids():
@@ -130,26 +144,10 @@ class ExecutionService(BackgroundService):
                 )
             )
             return
-        max_open = self.settings.risk.guards.max_open_positions
-        if max_open and self._open_positions_count() >= max_open:
-            self.logger.warning(
-                "signal rejected — max open positions reached",
-                extra={"max": max_open},
-            )
-            await self.bus.publish(
-                Event(
-                    "trade.rejected",
-                    {
-                        "signal_id": signal_id,
-                        "error": f"max open positions reached ({max_open})",
-                    },
-                )
-            )
-            return
-        risk = payload.get("risk")
         if self._broker is None:
             return
 
+        risk = payload.get("risk")
         volume = getattr(risk, "volume", 0.0)
         risk_amount = getattr(risk, "risk_amount", 0.0)
         magic = self._magic_for(signal)
@@ -167,50 +165,89 @@ class ExecutionService(BackgroundService):
         else:
             order_symbol = signal.symbol
 
-        result = self._broker.open_market_order(
-            symbol=order_symbol,
-            direction=signal.direction.value,
-            volume=volume,
-            sl=signal.sl,
-            tp=signal.tp,
-            magic=magic,
-        )
-        if not result.success:
-            self.logger.error("order failed", extra={"error": result.error})
+        max_open = self.settings.risk.guards.max_open_positions
+        rejected_error: str | None = None
+        trade_id: int | None = None
+        ticket: str | None = None
+
+        # The count-check, broker order, and TradeRecord insert form one
+        # critical section: the in-process lock serializes them within this
+        # process, and the FOR UPDATE guard row serializes them across
+        # processes so concurrent signals can't exceed max_open_positions.
+        with self._execution_lock:
+            for _ in range(2):
+                try:
+                    with self.db.session() as session:
+                        lock = session.get(SystemStateRecord, "open_positions_lock", with_for_update=True)
+                        if lock is None:
+                            session.add(SystemStateRecord(key="open_positions_lock", value={}))
+                            session.flush()
+                        if max_open and int(
+                            session.scalar(
+                                select(func.count())
+                                .select_from(TradeRecord)
+                                .where(TradeRecord.status == TradeStatus.OPEN.value)
+                            )
+                            or 0
+                        ) >= max_open:
+                            self.logger.warning(
+                                "signal rejected — max open positions reached",
+                                extra={"max": max_open},
+                            )
+                            rejected_error = f"max open positions reached ({max_open})"
+                        else:
+                            result = self._broker.open_market_order(
+                                symbol=order_symbol,
+                                direction=signal.direction.value,
+                                volume=volume,
+                                sl=signal.sl,
+                                tp=signal.tp,
+                                magic=magic,
+                            )
+                            if not result.success:
+                                self.logger.error("order failed", extra={"error": result.error})
+                                rejected_error = result.error
+                            else:
+                                record = TradeRecord(
+                                    signal_id=signal_id,
+                                    ticket=result.ticket,
+                                    strategy_id=signal.strategy_id,
+                                    symbol=signal.symbol,
+                                    direction=signal.direction.value,
+                                    volume=volume,
+                                    entry_price=result.price or 0.0,
+                                    sl=signal.sl,
+                                    tp=signal.tp,
+                                    status=TradeStatus.OPEN.value,
+                                    risk_amount=risk_amount,
+                                    deployment_mode=self.settings.base.deployment.mode,
+                                    pre_trade_confidence=(payload.get("assessment") or {}).get("confidence"),
+                                )
+                                session.add(record)
+                                session.flush()
+                                trade_id = record.id
+                                ticket = result.ticket
+                    break
+                except IntegrityError:
+                    # Lost a concurrent guard-row insert (SQLite ignores FOR
+                    # UPDATE); retry now that the row exists.
+                    continue
+
+        if rejected_error:
             await self.bus.publish(
-                Event("trade.rejected", {"signal_id": signal_id, "error": result.error})
+                Event("trade.rejected", {"signal_id": signal_id, "error": rejected_error})
             )
             return
 
-        with self.db.session() as session:
-            record = TradeRecord(
-                signal_id=signal_id,
-                ticket=result.ticket,
-                strategy_id=signal.strategy_id,
-                symbol=signal.symbol,
-                direction=signal.direction.value,
-                volume=volume,
-                entry_price=result.price or 0.0,
-                sl=signal.sl,
-                tp=signal.tp,
-                status=TradeStatus.OPEN.value,
-                risk_amount=risk_amount,
-                deployment_mode=self.settings.base.deployment.mode,
-                pre_trade_confidence=(payload.get("assessment") or {}).get("confidence"),
-            )
-            session.add(record)
-            session.flush()
-            trade_id = record.id
-
         self.logger.info(
             "trade opened",
-            extra={"ticket": result.ticket, "trade_id": trade_id,
+            extra={"ticket": ticket, "trade_id": trade_id,
                    "direction": signal.direction.value, "volume": volume},
         )
         await self.bus.publish(
             Event(
                 "trade.opened",
-                {"trade_id": trade_id, "ticket": result.ticket, "signal": signal, "volume": volume},
+                {"trade_id": trade_id, "ticket": ticket, "signal": signal, "volume": volume},
             )
         )
 
@@ -236,12 +273,85 @@ class ExecutionService(BackgroundService):
         if self._broker is None:
             return
         try:
+            await self._reconcile_with_broker()
             await self._reconcile_positions()
             await self.bus.publish(
                 Event("account.updated", {"equity": self._broker.account_equity()})
             )
         except Exception:  # noqa: BLE001
             self.logger.exception("position monitor tick failed")
+
+    async def _reconcile_with_broker(self, *, record_for_gate: bool = False) -> None:
+        """Compare broker-open positions against OPEN TradeRecords.
+
+        - Broker position with no matching record (orphan): alert via
+          ``system.critical``; when ``record_for_gate`` (startup pass) the issue
+          is surfaced to the startup validation gate so trading is blocked.
+        - OPEN record with no broker position: settle from the broker's trade
+          history if the close is known, otherwise flag it ``MANUAL_REVIEW``
+          (no PnL guessing).
+        """
+        if self._broker is None:
+            return
+        broker_positions = self._broker.get_positions()
+        broker_tickets = {p.ticket for p in broker_positions}
+        with self.db.session() as session:
+            open_records = session.query(TradeRecord).filter(
+                TradeRecord.status == TradeStatus.OPEN.value
+            ).all()
+            db_tickets = {r.ticket for r in open_records if r.ticket}
+
+        orphan_tickets = broker_tickets - db_tickets
+        for ticket in orphan_tickets:
+            self._report_orphan(ticket, record_for_gate=record_for_gate)
+
+        missing_tickets = db_tickets - broker_tickets
+        for record in open_records:
+            if record.ticket and record.ticket in missing_tickets:
+                await self._resolve_missing_position(record, record_for_gate=record_for_gate)
+
+        # Drop reports for orphans that resolved, so a recurrence re-alerts.
+        self._reported_orphans &= orphan_tickets
+
+    def _report_orphan(self, ticket: str, *, record_for_gate: bool) -> None:
+        detail = (
+            f"broker position {ticket} has no matching TradeRecord — "
+            "reconcile or close it before trading"
+        )
+        if ticket not in self._reported_orphans:
+            self._reported_orphans.add(ticket)
+            self.logger.critical("orphaned broker position", extra={"ticket": ticket})
+            self.bus.publish_nowait(Event("system.critical", {"error": detail}))
+        if record_for_gate and detail not in self._startup_reconcile_issues:
+            self._startup_reconcile_issues.append(detail)
+
+    async def _resolve_missing_position(self, record, *, record_for_gate: bool) -> None:
+        """An OPEN record whose ticket is gone from the broker."""
+        closed = self._broker.closed_trades_since({record.ticket})
+        if closed:
+            await self._settle_trade(next(c for c in closed if c.ticket == record.ticket))
+            return
+
+        detail = (
+            f"open TradeRecord {record.ticket} ({record.symbol}) has no broker position "
+            "and no close history — flagged for manual review"
+        )
+        with self.db.session() as session:
+            current = session.get(TradeRecord, record.id)
+            if current is None or current.status != TradeStatus.OPEN.value:
+                return
+            current.status = TradeStatus.MANUAL_REVIEW.value
+            current.meta = {
+                **(current.meta or {}),
+                "reconcile": "missing_broker_position",
+                "manual_review": True,
+            }
+            session.flush()
+        self.logger.critical("open trade missing at broker — manual review required",
+                             extra={"ticket": record.ticket, "symbol": record.symbol})
+        self.bus.publish_nowait(Event("system.critical", {"error": detail}))
+        if record_for_gate and detail not in self._startup_reconcile_issues:
+            self._startup_reconcile_issues.append(detail)
 
     async def _reconcile_positions(self) -> None:
         with self.db.session() as session:

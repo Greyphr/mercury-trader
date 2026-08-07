@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from datetime import UTC, datetime
 from typing import Any
+
+from fastapi import FastAPI, Header, HTTPException, Request
 
 from mercury.core.events import Event, EventBus
 from mercury.core.logging import get_logger
@@ -24,26 +27,25 @@ class TradingViewWebhookServer:
     or JSON field ``secret``). Each alert is published as ``signal.received``.
     """
 
-    def __init__(self, *, host: str, port: int, secret: str, bus: EventBus) -> None:
+    def __init__(self, *, host: str, port: int, secret: str, bus: EventBus, mode: str = "paper") -> None:
         self.host = host
         self.port = port
         self.secret = secret
+        self.mode = mode
         self.bus = bus
         self._server: Any = None
         self._task: asyncio.Task | None = None
         self.app = self._build_app()
 
     def _build_app(self) -> Any:
-        from fastapi import FastAPI, Header, HTTPException, Request
-
         app = FastAPI(title="Mercury Signal Webhook", docs_url=None, redoc_url=None)
 
         @app.post("/webhook")
         async def webhook(request: Request, x_mercury_secret: str | None = Header(default=None)) -> dict:
             if self.secret:
                 body = await request.json() if request.headers.get("content-type") == "application/json" else {}
-                provided = x_mercury_secret or (body or {}).get("secret")
-                if provided != self.secret:
+                provided = str(x_mercury_secret or (body or {}).get("secret") or "")
+                if not hmac.compare_digest(provided, self.secret):
                     raise HTTPException(status_code=401, detail="invalid secret")
             else:
                 body = await request.json()
@@ -83,6 +85,17 @@ class TradingViewWebhookServer:
 
     async def start(self) -> None:
         import uvicorn
+
+        if self.mode == "live" and not self.secret:
+            raise RuntimeError(
+                "refusing to start TradingView webhook in live mode without a secret — "
+                "set SIGNAL_WEBHOOK_SECRET / providers.signal.webhook.secret"
+            )
+        if not self.secret:
+            logger.warning(
+                "TradingView webhook running WITHOUT authentication — only safe for "
+                "local/paper use; set SIGNAL_WEBHOOK_SECRET before going live"
+            )
 
         config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")
         self._server = uvicorn.Server(config)

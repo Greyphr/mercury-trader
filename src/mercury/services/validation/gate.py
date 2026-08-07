@@ -46,11 +46,13 @@ class StartupValidationGate:
             self._check_config(),
             self._check_database(),
             self._check_broker(),
+            self._check_position_reconciliation(),
             self._check_symbols(),
             self._check_trading_arm(),
             self._check_promotion_stage(),
             self._check_kill_switch(),
             self._check_risk_config(),
+            self._check_webhook_secret(),
             self._check_notifications(),
         ]
         return self._last_results
@@ -101,6 +103,12 @@ class StartupValidationGate:
         if broker.is_connected():
             return ValidationResult("broker", True, f"{type(broker).__name__} connected")
         return self._fail("broker", f"{type(broker).__name__} not connected")
+
+    def _check_position_reconciliation(self) -> ValidationResult:
+        issues = self._execution.startup_reconcile_issues
+        if issues:
+            return self._fail("position_reconciliation", "; ".join(issues))
+        return ValidationResult("position_reconciliation", True, "broker positions match database")
 
     def _check_symbols(self) -> ValidationResult:
         provider = self._collector.provider
@@ -176,6 +184,19 @@ class StartupValidationGate:
         if problems:
             return self._fail("risk_config", "; ".join(problems))
         return ValidationResult("risk_config", True, "sane")
+
+    def _check_webhook_secret(self) -> ValidationResult:
+        if self._settings.base.deployment.mode != "live":
+            return ValidationResult("webhook_secret", True, "not required outside live mode", relevant=False)
+        if "tradingview" not in self._settings.providers.signal.providers:
+            return ValidationResult("webhook_secret", True, "webhook provider not enabled", relevant=False)
+        secret = self._settings.providers.signal.webhook.secret
+        if secret:
+            return ValidationResult("webhook_secret", True, "tradingview webhook secret configured")
+        return self._fail(
+            "webhook_secret",
+            "tradingview webhook enabled in live mode but SIGNAL_WEBHOOK_SECRET is missing",
+        )
 
     def _check_notifications(self) -> ValidationResult:
         if self._settings.base.deployment.mode != "live":

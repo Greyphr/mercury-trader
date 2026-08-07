@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import select
 
 from mercury.core.events import Event
+from mercury.core.logging import get_logger
 from mercury.core.validation import validate_against_schema
 from mercury.models.orm import NewsEventRecord, ProposalRecord, ReasoningRecord, TradeRecord
 from mercury.models.schemas import ProposalStatus, ReasoningKind
@@ -22,6 +23,8 @@ from mercury.services.hermes import prompts
 from mercury.services.hermes.llm import LLMClient, RuleBasedClient, build_llm_client
 
 _JSON_SAFE = (int, float, str, bool, type(None))
+
+logger = get_logger("services.hermes")
 
 
 def _jsonable(obj: Any) -> Any:
@@ -39,6 +42,10 @@ def _jsonable(obj: Any) -> Any:
     try:
         return _jsonable(vars(obj))
     except TypeError:
+        logger.debug(
+            "jsonable fallback — object stringified instead of serialized",
+            extra={"type": type(obj).__name__},
+        )
         return str(obj)
 
 
@@ -93,16 +100,19 @@ class HermesService(Service):
                 max_tokens=self.settings.providers.llm.structured.max_tokens,
             )
             validate_against_schema(structured, prompts.PRE_TRADE_SCHEMA)
+            provider = self._fast_client.name
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("pre-trade LLM failed; using rule fallback", extra={"error": str(exc)})
             structured = await RuleBasedClient().complete_structured(system="", user="")
             structured["notes"] = f"LLM fallback triggered: {str(exc)[:300]}"
+            provider = RuleBasedClient.name
+        structured.setdefault("provider", provider)
 
         confidence = float(structured.get("confidence", 0.5))
         self._persist_reasoning(
             kind=ReasoningKind.PRE_TRADE.value,
             signal_id=signal_id,
-            provider=self._fast_client.name,
+            provider=provider,
             confidence=confidence,
             summary=structured.get("summary", ""),
             structured=structured,
@@ -175,11 +185,12 @@ class HermesService(Service):
         summary = self._performance_summary()
         recent_trades = self._recent_trades(limit=30)
         news = self._recent_news(limit=20)
+        strategy_ids = [s.id for s in self.settings.strategies.strategies]
         structured = None
         try:
             structured = await self._deep_client.complete_structured(
                 system=prompts.HERMES_PERSONA,
-                user=prompts.daily_user_prompt(summary, recent_trades, news),
+                user=prompts.daily_user_prompt(summary, recent_trades, news, strategy_ids),
                 temperature=self.settings.providers.llm.structured.temperature,
                 max_tokens=2000,
             )
@@ -207,6 +218,8 @@ class HermesService(Service):
         for proposal in proposals:
             record = ProposalRecord(
                 source="hermes",
+                target_strategy_id=proposal.get("target_strategy_id")
+                or (proposal.get("proposed_config") or {}).get("id"),
                 hypothesis=proposal.get("hypothesis", ""),
                 description=proposal.get("description", ""),
                 proposed_config=proposal.get("proposed_config", {}),

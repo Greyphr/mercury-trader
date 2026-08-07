@@ -70,7 +70,7 @@ class BrokerAdapter(ABC):
         ...
 
     @abstractmethod
-    def account_equity(self) -> float:
+    def account_equity(self) -> float | None:
         ...
 
     @abstractmethod
@@ -312,6 +312,7 @@ class PaperBrokerAdapter(BrokerAdapter):
         self.balance = starting_balance
         self.positions: dict[str, Position] = {}
         self.closed: list[ClosedTrade] = []
+        self._prices: dict[str, dict[str, float]] = {}
         self._connected = False
 
     def connect(self) -> bool:
@@ -324,21 +325,33 @@ class PaperBrokerAdapter(BrokerAdapter):
     def is_connected(self) -> bool:
         return self._connected
 
-    def account_equity(self) -> float:
-        unrealized = sum(self._unrealized(p) for p in self.positions.values())
+    def account_equity(self) -> float | None:
+        unrealized = 0.0
+        for pos in self.positions.values():
+            u = self._unrealized(pos)
+            if u is None:
+                return None
+            unrealized += u
         return self.balance + unrealized
+
+    def update_prices(self, prices: dict[str, dict[str, float]]) -> None:
+        """Cache the latest bid/ask quotes (same shape as ``check_exits`` price_map)."""
+        self._prices = dict(prices)
 
     def open_market_order(self, *, symbol: str, direction: str, volume: float,
                           sl: float | None, tp: float | None, magic: int = 0) -> OrderResult:
         if not self._connected:
             return OrderResult(success=False, error="not connected")
+        entry = self._last_price(symbol)
+        if entry is None:
+            return OrderResult(success=False, error=f"no quote available for symbol '{symbol}'")
         ticket = uuid.uuid4().hex[:12]
         self.positions[ticket] = Position(
             ticket=ticket,
             symbol=symbol,
             direction=direction,
             volume=volume,
-            entry=round(self._last_price(symbol), 2),
+            entry=round(entry, 2),
             sl=sl,
             tp=tp,
         )
@@ -352,17 +365,20 @@ class PaperBrokerAdapter(BrokerAdapter):
     def close_position(self, ticket: str) -> OrderResult:
         trade = self.close_position_trade(ticket)
         if trade is None:
-            return OrderResult(success=False, error="position not found")
+            return OrderResult(success=False, error="position not found or no quote available")
         return OrderResult(success=True, ticket=ticket, price=trade.close_price)
 
     def close_position_trade(
         self, ticket: str, *, reason: str = "manual", price: float | None = None
     ) -> ClosedTrade | None:
         """Close a position and return the settled trade (paper accounting)."""
-        pos = self.positions.pop(ticket, None)
+        pos = self.positions.get(ticket)
         if pos is None:
             return None
         close_price = price if price is not None else self._last_price(pos.symbol)
+        if close_price is None:
+            return None
+        self.positions.pop(ticket, None)
         return self._settle(pos, close_price, reason)
 
     def modify_position(self, ticket: str, *, sl: float | None = None, tp: float | None = None) -> OrderResult:
@@ -423,19 +439,21 @@ class PaperBrokerAdapter(BrokerAdapter):
         self.closed.append(trade)
         return trade
 
-    def _unrealized(self, pos: Position) -> float:
+    def _unrealized(self, pos: Position) -> float | None:
         price = self._last_price(pos.symbol)
+        if price is None:
+            return None
         direction = 1 if pos.direction == "long" else -1
         return direction * (price - pos.entry) * self.contract_size * pos.volume
 
-    def _last_price(self, symbol: str) -> float:
-
-        candles = self._paper_candles(symbol)
-        return candles[-1].close if candles else 2350.0
-
-    @staticmethod
-    def _paper_candles(symbol: str) -> list:
-        return []
+    def _last_price(self, symbol: str) -> float | None:
+        px = self._prices.get(symbol)
+        if not px:
+            return None
+        bid, ask = px.get("bid", 0.0), px.get("ask", 0.0)
+        if bid and ask:
+            return (bid + ask) / 2.0
+        return bid or ask or None
 
 
 def _mt5_deal_reason(reason: int) -> str:

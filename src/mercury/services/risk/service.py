@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from mercury.core.config import session_allows
 from mercury.core.events import Event
@@ -94,7 +95,12 @@ class RiskManagerService(Service):
             reasons.append("deployment mode does not allow trading")
 
         confidence = float(assessment.get("confidence", 0.0))
-        if confidence < guards.min_confidence:
+        if assessment.get("provider") == "rule_based" and not guards.allow_rule_based_trading:
+            reasons.append(
+                "rule-based (degraded) assessment — trading disabled unless "
+                "allow_rule_based_trading is enabled"
+            )
+        elif confidence < guards.min_confidence:
             reasons.append(f"confidence {confidence:.2f} < {guards.min_confidence}")
 
         if self._kill_switch_active():
@@ -128,17 +134,24 @@ class RiskManagerService(Service):
 
         volume, risk_amount = self._position_size(signal, equity)
         if volume <= 0:
-            return RiskDecision(approved=False, reasons=["computed volume <= 0"])
+            if equity is None:
+                reason = "equity unavailable — cannot size position"
+            else:
+                reason = "computed volume out of range (see risk logs for details)"
+            return RiskDecision(approved=False, reasons=[reason])
         return RiskDecision(approved=True, volume=volume, risk_amount=risk_amount)
 
     # ── guards helpers ────────────────────────────────────────
     def _equity(self) -> float | None:
         if self._equity_provider is not None:
             try:
-                return float(self._equity_provider())
+                value = self._equity_provider()
             except Exception:  # noqa: BLE001
                 self.logger.warning("equity provider failed")
                 return None
+            if value is None:
+                return None
+            return float(value)
         return None
 
     def _kill_switch_active(self) -> bool:
@@ -168,12 +181,24 @@ class RiskManagerService(Service):
         return self._kill_switch_active()
 
     def _set_kill_switch(self, active: bool) -> None:
-        with self.db.session() as session:
-            state = session.get(SystemStateRecord, "kill_switch")
-            if state is None:
-                state = SystemStateRecord(key="kill_switch", value={})
-                session.add(state)
-            state.value = {"active": active, "armed_at": datetime.now(UTC).isoformat()}
+        value = {"active": active, "armed_at": datetime.now(UTC).isoformat()}
+        for _ in range(2):
+            try:
+                with self.db.session() as session:
+                    state = session.get(SystemStateRecord, "kill_switch", with_for_update=True)
+                    if state is None:
+                        state = SystemStateRecord(key="kill_switch", value=value)
+                        session.add(state)
+                        session.flush()
+                    else:
+                        state.value = value
+                return
+            except IntegrityError:
+                # Lost a concurrent first write (SQLite ignores FOR UPDATE, so
+                # the INSERT can race a duplicate key). Retry as an update now
+                # that the row exists.
+                continue
+        raise RuntimeError("kill switch state could not be persisted after a concurrent retry")
 
     def _in_trading_session(self) -> bool:
         return session_allows(self.settings.base.trading_sessions, datetime.now(UTC))
@@ -203,10 +228,15 @@ class RiskManagerService(Service):
         """Return today's realized+unrealized P&L as % of starting balance (approx)."""
         start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         with self.db.session() as session:
-            closed = session.scalars(
-                select(TradeRecord).where(TradeRecord.status == TradeStatus.CLOSED.value)
-            ).all()
-        today = sum(t.pnl for t in closed if t.closed_at and t.closed_at >= start)
+            today = float(
+                session.scalar(
+                    select(func.coalesce(func.sum(TradeRecord.pnl), 0.0)).where(
+                        TradeRecord.status == TradeStatus.CLOSED.value,
+                        TradeRecord.closed_at >= start,
+                    )
+                )
+                or 0.0
+            )
         equity = self._equity() or 0.0
         if equity <= 0:
             return 0.0
@@ -227,8 +257,21 @@ class RiskManagerService(Service):
         if sl_distance <= 0:
             return 0.0, 0.0
         if equity is None:
-            equity = 10_000.0
+            return 0.0, 0.0
         contract = sizing.contract_size or 100.0
         volume = (equity * risk_pct) / (sl_distance * contract)
-        volume = max(0.01, round(volume, 2))
-        return volume, equity * risk_pct
+        if volume < 0.01 or volume > sizing.max_volume:
+            self.logger.warning(
+                "computed volume out of range — trade rejected",
+                extra={
+                    "volume": round(volume, 4),
+                    "min_volume": 0.01,
+                    "max_volume": sizing.max_volume,
+                    "sl_distance": sl_distance,
+                    "equity": equity,
+                    "risk_pct": risk_pct,
+                    "symbol": signal.symbol,
+                },
+            )
+            return 0.0, 0.0
+        return round(volume, 2), equity * risk_pct

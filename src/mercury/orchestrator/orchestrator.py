@@ -14,7 +14,7 @@ from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from mercury.core.config import Settings, load_config
+from mercury.core.config import Settings, load_config, redact_database_url
 from mercury.core.db import Database
 from mercury.core.events import Event, EventBus
 from mercury.core.logging import get_logger, setup_logging
@@ -42,8 +42,11 @@ class MercuryOrchestrator:
             level=self._env("LOG_LEVEL", "INFO"),
             log_dir=self.settings.base.paths.log_dir,
         )
-        self.bus = EventBus()
         self.db = Database.from_settings(self.settings)
+        self.bus = EventBus(
+            db=self.db,
+            audit_topics=self.settings.base.events.audit_topics,
+        )
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.services: list[Any] = []
         self._running = False
@@ -93,13 +96,12 @@ class MercuryOrchestrator:
         try:
             self.db.create_tables()
         except Exception as exc:  # noqa: BLE001
+            safe_url = redact_database_url(self.settings.database_url)
             logger.error(
                 "startup aborted: database unreachable",
-                extra={"error": str(exc), "url": self.settings.database_url},
+                extra={"error": str(exc), "url": safe_url},
             )
-            raise RuntimeError(
-                f"database unreachable ({self.settings.database_url}): {exc}"
-            ) from exc
+            raise RuntimeError(f"database unreachable ({safe_url}): {exc}") from exc
         self.build_services()
 
         for service in self.services:
@@ -141,6 +143,8 @@ class MercuryOrchestrator:
         self.scheduler.add_job(self.analytics.tick, "interval", seconds=jobs.health_check, id="analytics")
         self.scheduler.add_job(self._daily_analysis, "cron", hour=self._hour(jobs.hermes_daily_hour), minute=self._minute(jobs.hermes_daily_hour), id="hermes_daily")
         self.scheduler.add_job(self.notifications.send_daily_report, "cron", hour=self._hour(jobs.reports_daily), minute=self._minute(jobs.reports_daily), id="report_daily")
+        self.scheduler.add_job(self.notifications.send_weekly_report, "cron", id="report_weekly", **self._parse_report_schedule(jobs.reports_weekly))
+        self.scheduler.add_job(self.notifications.send_monthly_report, "cron", id="report_monthly", **self._parse_report_schedule(jobs.reports_monthly))
         self.scheduler.add_job(self._health_check, "interval", seconds=jobs.health_check, id="health")
         self.scheduler.start()
 
@@ -151,6 +155,26 @@ class MercuryOrchestrator:
     @staticmethod
     def _minute(hhmm: str) -> int:
         return int(hhmm.split(":")[1])
+
+    @staticmethod
+    def _parse_report_schedule(spec: str) -> dict[str, Any]:
+        """Parse a report schedule string into apscheduler cron kwargs.
+
+        Supported forms: ``"HH:MM"`` (daily), ``"fri 23:55"`` (weekly), and
+        ``"last-day 23:55"`` (last day of month).
+        """
+        parts = spec.split()
+        if len(parts) == 2:
+            day_token, hhmm = parts
+        else:
+            day_token, hhmm = None, parts[0]
+        hour = int(hhmm.split(":")[0])
+        minute = int(hhmm.split(":")[1])
+        if day_token == "last-day":
+            return {"day": "last", "hour": hour, "minute": minute}
+        if day_token:
+            return {"day_of_week": day_token, "hour": hour, "minute": minute}
+        return {"hour": hour, "minute": minute}
 
     async def _daily_analysis(self) -> None:
         logger.info("running daily Hermes analysis")

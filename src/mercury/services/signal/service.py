@@ -27,7 +27,8 @@ class SignalService(Service):
         if "tradingview" in self.settings.providers.signal.providers:
             cfg = self.settings.providers.signal.webhook
             self._webhook = TradingViewWebhookServer(
-                host=cfg.host, port=cfg.port, secret=cfg.secret, bus=self.bus
+                host=cfg.host, port=cfg.port, secret=cfg.secret, bus=self.bus,
+                mode=self.settings.base.deployment.mode,
             )
             await self._webhook.start()
         self.mark_healthy("signal service ready")

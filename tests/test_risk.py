@@ -1,7 +1,11 @@
+import asyncio
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from mercury.core.events import EventBus
-from mercury.models.schemas import Direction, Signal, SignalSource
+from mercury.models.orm import TradeRecord
+from mercury.models.schemas import Direction, Signal, SignalSource, TradeStatus
 from mercury.services.risk.service import RiskManagerService
 
 
@@ -70,3 +74,173 @@ async def test_position_size_risk_scales_with_equity(settings, db):
     svc2 = _risk_service(settings, db, equity=20000.0)
     d2 = svc2.evaluate(_signal(), {"confidence": 0.9})
     assert d2.volume == pytest.approx(d1.volume * 2, rel=0.05)
+
+
+@pytest.mark.asyncio
+async def test_equity_unavailable_rejects(settings, db):
+    svc = _risk_service(settings, db)
+    svc.set_equity_provider(lambda: None)
+    decision = svc.evaluate(_signal(), {"confidence": 0.9})
+    assert not decision.approved
+    assert any("equity" in r.lower() and "unavailable" in r.lower() for r in decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_volume_above_max_rejected(settings, db):
+    settings.risk.sizing.max_volume = 1.0
+    svc = _risk_service(settings, db)
+    tight = _signal().model_copy(update={"price": 2400.0, "sl": 2399.9, "tp": 2412.0})
+    decision = svc.evaluate(tight, {"confidence": 0.9})
+    assert not decision.approved
+    assert any("volume" in r.lower() and "out of range" in r.lower() for r in decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_volume_below_min_rejected(settings, db):
+    svc = _risk_service(settings, db, equity=100.0)
+    wide = _signal().model_copy(update={"price": 2400.0, "sl": 2399.0, "tp": 2412.0})
+    decision = svc.evaluate(wide, {"confidence": 0.9})
+    assert not decision.approved
+    assert any("volume" in r.lower() and "out of range" in r.lower() for r in decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_rule_based_assessment_rejected_by_default(settings, db):
+    svc = _risk_service(settings, db)
+    assert settings.risk.guards.allow_rule_based_trading is False
+    decision = svc.evaluate(_signal(), {"provider": "rule_based", "confidence": 0.6})
+    assert not decision.approved
+    assert any("rule-based" in r.lower() for r in decision.reasons)
+    assert not any("confidence" in r and "<" in r for r in decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_rule_based_assessment_allowed_when_flag_enabled(settings, db):
+    settings.risk.guards.allow_rule_based_trading = True
+    svc = _risk_service(settings, db)
+    decision = svc.evaluate(_signal(), {"provider": "rule_based", "confidence": 0.6})
+    assert decision.approved
+    assert decision.volume > 0
+
+
+@pytest.mark.asyncio
+async def test_rule_based_assessment_still_confidence_gated_when_flag_enabled(settings, db):
+    settings.risk.guards.allow_rule_based_trading = True
+    svc = _risk_service(settings, db)
+    decision = svc.evaluate(_signal(), {"provider": "rule_based", "confidence": 0.1})
+    assert not decision.approved
+    assert any("confidence" in r for r in decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_real_llm_assessment_uses_normal_confidence_gate(settings, db):
+    svc = _risk_service(settings, db)
+    decision = svc.evaluate(_signal(), {"provider": "openai_compat", "confidence": 0.6})
+    assert decision.approved
+    decision_low = svc.evaluate(_signal(), {"provider": "anthropic", "confidence": 0.1})
+    assert not decision_low.approved
+    assert any("confidence" in r for r in decision_low.reasons)
+
+
+@pytest.mark.asyncio
+async def test_today_pnl_percent_only_counts_today(settings, db):
+    svc = _risk_service(settings, db)
+    now = datetime.now(UTC)
+    with db.session() as session:
+        session.add(
+            TradeRecord(
+                symbol="XAUUSD",
+                direction=Direction.LONG.value,
+                volume=0.01,
+                entry_price=2400.0,
+                status=TradeStatus.CLOSED.value,
+                pnl=50.0,
+                opened_at=now - timedelta(hours=2),
+                closed_at=now,
+                deployment_mode="development",
+            )
+        )
+        session.add(
+            TradeRecord(
+                symbol="XAUUSD",
+                direction=Direction.LONG.value,
+                volume=0.01,
+                entry_price=2400.0,
+                status=TradeStatus.CLOSED.value,
+                pnl=-200.0,
+                opened_at=now - timedelta(days=2),
+                closed_at=now - timedelta(days=1),
+                deployment_mode="development",
+            )
+        )
+    assert svc._today_pnl_percent() == pytest.approx((50.0 / 10000.0) * 100.0)
+
+
+@pytest.mark.asyncio
+async def test_today_pnl_percent_excludes_null_closed_at(settings, db):
+    svc = _risk_service(settings, db)
+    with db.session() as session:
+        session.add(
+            TradeRecord(
+                symbol="XAUUSD",
+                direction=Direction.LONG.value,
+                volume=0.01,
+                entry_price=2400.0,
+                status=TradeStatus.CLOSED.value,
+                pnl=1000.0,
+                deployment_mode="development",
+            )
+        )
+    assert svc._today_pnl_percent() == 0.0
+
+
+def _file_db(tmp_path, name):
+    from mercury.core.db import Database
+
+    database = Database(f"sqlite:///{tmp_path / name}")
+    database.create_tables()
+    return database
+
+
+def _kill_switch_rows(database):
+    from sqlalchemy import select
+
+    from mercury.models.orm import SystemStateRecord
+
+    with database.session() as session:
+        return list(session.scalars(select(SystemStateRecord)))
+
+
+@pytest.mark.asyncio
+async def test_concurrent_set_kill_switch_consistent(tmp_path, settings):
+    database = _file_db(tmp_path, "kill_switch.db")
+    svc = RiskManagerService(bus=EventBus(), settings=settings, db=database)
+    svc.set_kill_switch(True)  # pre-seed the row so writers contend on it
+
+    await asyncio.gather(
+        asyncio.to_thread(svc._set_kill_switch, True),
+        asyncio.to_thread(svc._set_kill_switch, False),
+    )
+
+    rows = _kill_switch_rows(database)
+    assert len(rows) == 1
+    assert rows[0].value["active"] in (True, False)
+    assert "armed_at" in rows[0].value
+    database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_kill_switch_write_creates_single_row(tmp_path, settings):
+    database = _file_db(tmp_path, "kill_switch_first.db")
+    svc = RiskManagerService(bus=EventBus(), settings=settings, db=database)
+
+    await asyncio.gather(
+        asyncio.to_thread(svc._set_kill_switch, True),
+        asyncio.to_thread(svc._set_kill_switch, False),
+    )
+
+    rows = _kill_switch_rows(database)
+    assert len(rows) == 1
+    assert rows[0].value["active"] in (True, False)
+    assert "armed_at" in rows[0].value
+    database.dispose()

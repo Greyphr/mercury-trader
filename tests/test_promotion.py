@@ -168,6 +168,7 @@ def _gate_with_promotion(settings, db, promotion):
 
     class FakeExecution:
         broker = FakeBroker()
+        startup_reconcile_issues: list[str] = []
 
     class FakeCollector:
         provider = FakeProvider()

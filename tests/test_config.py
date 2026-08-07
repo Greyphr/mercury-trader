@@ -1,6 +1,6 @@
 from pydantic import ValidationError
 
-from mercury.core.config import Settings, load_config
+from mercury.core.config import Settings, load_config, redact_database_url
 
 
 def test_config_loads(settings):
@@ -59,3 +59,18 @@ def test_postgres_engine_has_connect_timeout():
         assert params.get("connect_timeout") == 10
     finally:
         db.dispose()
+
+
+def test_redact_database_url_hides_password():
+    redacted = redact_database_url("postgresql+psycopg://user:secret@host:5432/db")
+    assert "secret" not in redacted
+    assert "user:***@host:5432/db" in redacted
+
+
+def test_redact_database_url_preserves_url_without_credentials():
+    redacted = redact_database_url("postgresql+psycopg://host:5432/db")
+    assert redacted == "postgresql+psycopg://host:5432/db"
+
+
+def test_redact_database_url_falls_back_on_garbage():
+    assert redact_database_url("not a url") == "not a url"
