@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from mercury.core.events import Event
@@ -24,7 +25,13 @@ class AnalyticsService(BackgroundService):
         try:
             metrics = compute_metrics(self.db)
             with self.db.session() as session:
-                session.add(MetricsRecord(period="periodic", metrics=metrics))
+                session.add(
+                    MetricsRecord(
+                        period="periodic",
+                        as_of=datetime.fromisoformat(metrics["as_of"]),
+                        metrics=metrics,
+                    )
+                )
             await self.bus.publish(Event("analytics.snapshot", metrics))
             self.mark_healthy("metrics snapshot recorded")
         except Exception:  # noqa: BLE001

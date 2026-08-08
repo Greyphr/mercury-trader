@@ -20,6 +20,7 @@ from mercury.core.events import Event, EventBus
 from mercury.core.logging import get_logger, setup_logging
 from mercury.services.analytics.service import AnalyticsService
 from mercury.services.data.collector import DataCollectorService
+from mercury.services.execution.broker import PaperBrokerAdapter
 from mercury.services.execution.service import ExecutionService
 from mercury.services.hermes.service import HermesService
 from mercury.services.learning.service import LearningService
@@ -121,6 +122,7 @@ class MercuryOrchestrator:
                 "services": [s.name for s in self.services],
             },
         )
+        self._log_environment_profile()
 
     async def stop(self) -> None:
         self._running = False
@@ -215,8 +217,32 @@ class MercuryOrchestrator:
         unhealthy = [s.name for s in self.services if not s.health[0]]
         if unhealthy:
             logger.warning("unhealthy services", extra={"services": unhealthy})
-            await self.bus.publish_nowait(Event("system.critical", {"error": f"unhealthy: {unhealthy}"}))
+            self.bus.publish_nowait(Event("system.critical", {"error": f"unhealthy: {unhealthy}"}))
         self.mark_healthy_snapshot()
+
+    def _log_environment_profile(self) -> None:
+        """Emit a plain-text startup line making the active broker unmistakable.
+
+        Structured ``extra`` fields don't always render in plain console output,
+        so this uses a single formatted message instead. Paper (or disabled)
+        execution warns loudly; a real MT5 backend logs at INFO.
+        """
+        env_name = self.settings.environment.name
+        broker = self.execution.broker
+        if broker is None:
+            logger.warning(
+                f"environment={env_name} — TRADING DISABLED, no broker active "
+                "(trading not armed or read_only mode)"
+            )
+            return
+        if isinstance(broker, PaperBrokerAdapter):
+            logger.warning(
+                f"environment={env_name} — PAPER BROKER ACTIVE, no real orders will be placed"
+            )
+            return
+        server = getattr(broker, "server", None) or self.settings.environment.mt5.server
+        level = logger.warning if env_name == "development" else logger.info
+        level(f"environment={env_name} — MT5 broker active (server={server})")
 
     def mark_healthy_snapshot(self) -> None:
         states = {s.name: (s.health[0], s.health[1]) for s in self.services}

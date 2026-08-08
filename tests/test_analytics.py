@@ -1,7 +1,11 @@
+from datetime import datetime
+
 import pytest
 
-from mercury.models.orm import TradeRecord
-from mercury.services.analytics.metrics import compute_metrics
+from mercury.core.events import EventBus
+from mercury.models.orm import MetricsRecord, TradeRecord
+from mercury.services.analytics.metrics import compute_metrics, compute_metrics_snapshot
+from mercury.services.analytics.service import AnalyticsService
 
 
 def _insert_trade(db, *, pnl=0.0, pnl_r=0.0, status="closed", direction="long", close_reason="tp"):
@@ -51,3 +55,30 @@ def test_open_trades_excluded(db):
     _insert_trade(db, pnl=0.0, pnl_r=0.0, status="open")
     metrics = compute_metrics(db)
     assert metrics["total_trades"] == 0
+
+
+@pytest.mark.asyncio
+async def test_tick_records_metrics_with_non_null_as_of(db, settings):
+    svc = AnalyticsService(bus=EventBus(), settings=settings, db=db)
+    await svc.tick()
+
+    with db.session() as session:
+        records = list(session.query(MetricsRecord).all())
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.period == "periodic"
+    assert record.as_of is not None
+    assert record.as_of == datetime.fromisoformat(record.metrics["as_of"]).replace(tzinfo=None)
+
+
+def test_compute_metrics_snapshot_records_as_of(db):
+    metrics = compute_metrics_snapshot(db, period="daily")
+
+    with db.session() as session:
+        records = list(session.query(MetricsRecord).all())
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.period == "daily"
+    assert record.as_of == datetime.fromisoformat(metrics["as_of"]).replace(tzinfo=None)

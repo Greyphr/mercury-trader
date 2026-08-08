@@ -16,7 +16,7 @@
 # must be flipped to `true` by a human before any order can be placed.
 # ──────────────────────────────────────────────────────────────
 
-default: development
+default: metaquotes_demo
 
 environments:
   development:

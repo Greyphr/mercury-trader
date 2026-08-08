@@ -118,5 +118,11 @@ def compute_metrics_snapshot(db, *, period: str) -> dict[str, Any]:
 
     metrics = compute_metrics(db)
     with db.session() as session:
-        session.add(MetricsRecord(period=period, metrics=metrics))
+        session.add(
+            MetricsRecord(
+                period=period,
+                as_of=datetime.fromisoformat(metrics["as_of"]),
+                metrics=metrics,
+            )
+        )
     return metrics

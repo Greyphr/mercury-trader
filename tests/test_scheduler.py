@@ -1,6 +1,10 @@
+import logging
 from types import SimpleNamespace
 
+import pytest
+
 from mercury.orchestrator.orchestrator import MercuryOrchestrator
+from mercury.services.execution.broker import MT5BrokerAdapter, PaperBrokerAdapter
 
 
 class FakeScheduler:
@@ -12,6 +16,14 @@ class FakeScheduler:
 
     def start(self) -> None:
         pass
+
+
+class RecordingBus:
+    def __init__(self) -> None:
+        self.events = []
+
+    def publish_nowait(self, event) -> None:
+        self.events.append(event)
 
 
 def _fake_orchestrator(settings):
@@ -74,3 +86,71 @@ def test_parse_report_schedule_last_day_of_month():
         "hour": 23,
         "minute": 55,
     }
+
+
+@pytest.mark.asyncio
+async def test_health_check_publishes_critical_and_snapshots_when_unhealthy():
+    orch = MercuryOrchestrator.__new__(MercuryOrchestrator)
+    bus = RecordingBus()
+    orch.bus = bus
+    orch.services = [
+        SimpleNamespace(name="execution", health=(False, "broker connection failed")),
+        SimpleNamespace(name="analytics", health=(True, "running")),
+    ]
+    snapshots = []
+    orch.mark_healthy_snapshot = lambda: snapshots.append(True)
+
+    await orch._health_check()
+
+    assert len(bus.events) == 1
+    assert bus.events[0].topic == "system.critical"
+    assert snapshots == [True]
+
+
+@pytest.mark.asyncio
+async def test_health_check_no_critical_when_all_healthy():
+    orch = MercuryOrchestrator.__new__(MercuryOrchestrator)
+    bus = RecordingBus()
+    orch.bus = bus
+    orch.services = [SimpleNamespace(name="analytics", health=(True, "running"))]
+    snapshots = []
+    orch.mark_healthy_snapshot = lambda: snapshots.append(True)
+
+    await orch._health_check()
+
+    assert bus.events == []
+    assert snapshots == [True]
+
+
+def test_startup_visibility_warns_paper_broker_for_development(caplog, settings):
+    orch = MercuryOrchestrator.__new__(MercuryOrchestrator)
+    orch.settings = settings
+    orch.execution = SimpleNamespace(broker=PaperBrokerAdapter(contract_size=100.0))
+
+    with caplog.at_level("WARNING", logger="mercury.orchestrator"):
+        orch._log_environment_profile()
+
+    records = [r for r in caplog.records if r.name == "mercury.orchestrator"]
+    assert any("PAPER BROKER ACTIVE" in r.getMessage() for r in records)
+    assert any(r.levelno == logging.WARNING for r in records)
+
+
+def test_startup_visibility_logs_mt5_broker_at_info(caplog, settings):
+    orch = MercuryOrchestrator.__new__(MercuryOrchestrator)
+    orch.settings = settings.model_copy(
+        update={
+            "environment": settings.environment.model_copy(
+                update={"name": "metaquotes_demo"}
+            )
+        }
+    )
+    orch.execution = SimpleNamespace(
+        broker=MT5BrokerAdapter(login="123", password="pw", server="MetaQuotes-Demo")
+    )
+
+    with caplog.at_level("INFO", logger="mercury.orchestrator"):
+        orch._log_environment_profile()
+
+    records = [r for r in caplog.records if r.name == "mercury.orchestrator"]
+    assert any("MT5 broker active (server=MetaQuotes-Demo)" in r.getMessage() for r in records)
+    assert all(r.levelno == logging.INFO for r in records)
