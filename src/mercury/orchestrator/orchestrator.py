@@ -116,7 +116,7 @@ class MercuryOrchestrator:
         logger.info(
             "orchestrator started",
             extra={
-                "mode": self.settings.base.deployment.mode,
+                "mode": self.settings.deployment_mode,
                 "environment": self.settings.environment.name,
                 "trading_enabled": self.settings.environment.trading_enabled,
                 "services": [s.name for s in self.services],

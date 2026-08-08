@@ -69,7 +69,7 @@ class ExecutionService(BackgroundService):
             self.logger.warning("execution disabled — environment not armed for trading")
             self.mark_healthy("execution disabled (trading not armed)")
             return
-        if self.settings.base.deployment.mode == "read_only":
+        if self.settings.deployment_mode == "read_only":
             self._broker = None
             self.logger.info("read_only mode — execution disabled")
             self.mark_healthy("execution disabled (read_only)")
@@ -220,7 +220,7 @@ class ExecutionService(BackgroundService):
                                     tp=signal.tp,
                                     status=TradeStatus.OPEN.value,
                                     risk_amount=risk_amount,
-                                    deployment_mode=self.settings.base.deployment.mode,
+                                    deployment_mode=self.settings.deployment_mode,
                                     pre_trade_confidence=(payload.get("assessment") or {}).get("confidence"),
                                 )
                                 session.add(record)

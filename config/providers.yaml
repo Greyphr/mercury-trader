@@ -41,7 +41,7 @@ llm:
   #   local   = everything through Ollama
   #   external= everything through OpenAI/Anthropic
   #   none    = rule-based Hermes (no LLM calls)
-  mode: hybrid
+  mode: external
   external:
     provider: openai           # openai | anthropic
     openai: {}

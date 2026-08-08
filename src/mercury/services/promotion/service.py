@@ -120,7 +120,7 @@ class PromotionService(Service):
         environments informationally), so a demotion while running blocks
         further orders immediately.
         """
-        if self.settings.base.deployment.mode != "live":
+        if self.settings.deployment_mode != "live":
             return True
         return _rank(self.get_stage(strategy_id)) >= _rank(StrategyStage.APPROVED)
 

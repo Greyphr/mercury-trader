@@ -97,7 +97,7 @@ class StartupValidationGate:
             return ValidationResult(
                 "broker",
                 True,
-                f"no broker (mode={self._settings.base.deployment.mode}, trading disabled)",
+                f"no broker (mode={self._settings.deployment_mode}, trading disabled)",
                 relevant=False,
             )
         if broker.is_connected():
@@ -123,7 +123,7 @@ class StartupValidationGate:
         return ValidationResult("symbols", True, f"preferred symbols verified: {sorted(verified)}")
 
     def _check_trading_arm(self) -> ValidationResult:
-        mode = self._settings.base.deployment.mode
+        mode = self._settings.deployment_mode
         if mode != "live":
             return ValidationResult("trading_arm", True, f"not required in '{mode}' mode", relevant=False)
         env = self._settings.environment
@@ -152,7 +152,7 @@ class StartupValidationGate:
             if not ok:
                 stage = self._promotion.get_stage(strategy.id).value
                 blockers.append(f"{strategy.id}@{stage} (need {required.value})")
-        if blockers and self._settings.base.deployment.mode == "live":
+        if blockers and self._settings.deployment_mode == "live":
             return self._fail("promotion", "strategy lifecycle blocks live trading: " + "; ".join(blockers))
         if blockers:
             return ValidationResult(
@@ -186,7 +186,7 @@ class StartupValidationGate:
         return ValidationResult("risk_config", True, "sane")
 
     def _check_webhook_secret(self) -> ValidationResult:
-        if self._settings.base.deployment.mode != "live":
+        if self._settings.deployment_mode != "live":
             return ValidationResult("webhook_secret", True, "not required outside live mode", relevant=False)
         if "tradingview" not in self._settings.providers.signal.providers:
             return ValidationResult("webhook_secret", True, "webhook provider not enabled", relevant=False)
@@ -199,7 +199,7 @@ class StartupValidationGate:
         )
 
     def _check_notifications(self) -> ValidationResult:
-        if self._settings.base.deployment.mode != "live":
+        if self._settings.deployment_mode != "live":
             return ValidationResult("notifications", True, "not required outside live mode", relevant=False)
         backend = self._settings.providers.notifications.backend
         if backend == "telegram":

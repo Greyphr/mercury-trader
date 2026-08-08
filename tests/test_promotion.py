@@ -145,7 +145,7 @@ def test_stage_guard_allows_paper_mode_unconditionally(db):
 
 def test_stage_guard_blocks_live_until_approved(db):
     svc = make_service(db, environment="exness_live")
-    svc.settings.base.deployment.mode = "live"
+    svc.settings.deployment_mode_override = "live"
     assert svc.stage_guard("xauusd_m5_trend") is False
     for stage in ("paper", "demo", "review"):
         svc.promote("xauusd_m5_trend", stage)
@@ -199,7 +199,7 @@ def test_gate_reports_promotion_info_in_development(db):
 
 def test_gate_blocks_live_when_strategy_not_approved(db):
     settings = load_config(environment="exness_live")
-    settings.base.deployment.mode = "live"
+    settings.deployment_mode_override = "live"
     settings.environment.trading_enabled = True
     svc = make_service(db, environment="exness_live")
     gate = _gate_with_promotion(settings, db, svc)
@@ -210,7 +210,7 @@ def test_gate_blocks_live_when_strategy_not_approved(db):
 
 def test_gate_promotion_passes_once_approved(db):
     settings = load_config(environment="exness_live")
-    settings.base.deployment.mode = "live"
+    settings.deployment_mode_override = "live"
     settings.environment.trading_enabled = True
     svc = make_service(db, environment="exness_live")
     for sid in ("xauusd_m5_trend", "xauusd_m5_ict"):

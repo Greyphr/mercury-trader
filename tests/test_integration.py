@@ -15,7 +15,7 @@ from mercury.orchestrator.orchestrator import MercuryOrchestrator
 def integration_settings(tmp_path):
     settings = load_config()
     settings.database_url = f"sqlite:///{tmp_path / 'itest.db'}"
-    settings.base.deployment.mode = "paper"
+    settings.deployment_mode_override = "paper"
     settings.risk.guards.session_check = False
     settings.risk.guards.news_blackout_minutes = 0
     # Hermes is rule-based in the test env (no LLM); the operator flag must be

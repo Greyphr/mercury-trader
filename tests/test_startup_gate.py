@@ -96,7 +96,7 @@ def test_gate_blocks_on_kill_switch(settings, db):
 
 def test_gate_blocks_live_without_arm(db):
     settings = load_config(environment="exness_live")
-    settings.base.deployment.mode = "live"
+    settings.deployment_mode_override = "live"
     gate = build_gate(settings, db)
     gate.run()
     assert gate.passed is False
@@ -107,7 +107,7 @@ def test_gate_blocks_live_without_notifications(db, monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     settings = load_config()
-    settings.base.deployment.mode = "live"
+    settings.deployment_mode_override = "live"
     gate = build_gate(settings, db)
     gate.run()
     assert gate.passed is False
@@ -117,7 +117,7 @@ def test_gate_blocks_live_without_notifications(db, monkeypatch):
 def test_gate_blocks_live_without_webhook_secret(db, monkeypatch):
     monkeypatch.delenv("SIGNAL_WEBHOOK_SECRET", raising=False)
     settings = load_config()
-    settings.base.deployment.mode = "live"
+    settings.deployment_mode_override = "live"
     gate = build_gate(settings, db)
     gate.run()
     assert gate.passed is False
@@ -127,7 +127,7 @@ def test_gate_blocks_live_without_webhook_secret(db, monkeypatch):
 def test_gate_webhook_secret_passes_in_live_when_set(db, monkeypatch):
     monkeypatch.setenv("SIGNAL_WEBHOOK_SECRET", "s3cret")
     settings = load_config()
-    settings.base.deployment.mode = "live"
+    settings.deployment_mode_override = "live"
     gate = build_gate(settings, db)
     gate.run()
     assert check(gate, "webhook_secret").ok is True
@@ -161,7 +161,7 @@ def test_gate_blocks_live_mt5_without_credentials(db, monkeypatch):
     for var in ("MT5_LOGIN_LIVE", "MT5_PASSWORD_LIVE"):
         monkeypatch.delenv(var, raising=False)
     settings = load_config(environment="exness_live")
-    settings.base.deployment.mode = "live"
+    settings.deployment_mode_override = "live"
     settings.environment.trading_enabled = True
     gate = build_gate(settings, db)
     gate.run()
@@ -209,7 +209,7 @@ async def test_orchestrator_blocks_trading_when_gate_fails(tmp_path):
     from mercury.orchestrator.orchestrator import MercuryOrchestrator
 
     settings = load_config(environment="exness_live")
-    settings.base.deployment.mode = "live"
+    settings.deployment_mode_override = "live"
     settings.database_url = f"sqlite:///{tmp_path / 'gate.db'}"
     settings.providers.signal.providers = ["internal"]
     settings.risk.guards.session_check = False

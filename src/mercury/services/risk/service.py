@@ -91,7 +91,7 @@ class RiskManagerService(Service):
         guards = self.settings.risk.guards
         reasons: list[str] = []
 
-        if not self.settings.base.deployment.can_trade:
+        if self.settings.deployment_mode not in ("live", "paper"):
             reasons.append("deployment mode does not allow trading")
 
         confidence = float(assessment.get("confidence", 0.0))
