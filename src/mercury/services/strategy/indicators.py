@@ -47,12 +47,14 @@ def ema(values: np.ndarray, period: int) -> np.ndarray:
     return out
 
 
-def ema_cross_signal(closes: np.ndarray, fast_period: int, slow_period: int) -> list[str | None]:
-    """EMA cross direction per candle index: ``'up'`` / ``'down'`` / ``None``.
+def ema_cross_signal(
+    closes: np.ndarray, fast_period: int, slow_period: int
+) -> tuple[list[str | None], np.ndarray, np.ndarray]:
+    """EMA cross direction plus the underlying fast/slow EMA arrays.
 
-    A candle is ``'up'`` when the fast EMA crosses above the slow EMA on that
-    candle, ``'down'`` when it crosses below; candles during warmup or with no
-    cross return ``None``.
+    ``crosses[i]`` is ``'up'`` when the fast EMA crosses above the slow EMA on
+    candle ``i``, ``'down'`` when it crosses below; candles during warmup or
+    with no cross are ``None``. ``fast`` and ``slow`` match the input length.
     """
     fast = ema(closes, fast_period)
     slow = ema(closes, slow_period)
@@ -64,7 +66,7 @@ def ema_cross_signal(closes: np.ndarray, fast_period: int, slow_period: int) -> 
             out[i] = "up"
         elif fast[i - 1] >= slow[i - 1] and fast[i] < slow[i]:
             out[i] = "down"
-    return out
+    return out, fast, slow
 
 
 def rsi(values: np.ndarray, period: int = 14) -> np.ndarray:

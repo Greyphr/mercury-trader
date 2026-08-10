@@ -148,6 +148,7 @@ class TelegramNotifier(Notifier):
 
     async def _worker(self) -> None:
         queue = self._queue
+        assert queue is not None, "send worker started before notification queue was initialized"
         while True:
             item = await queue.get()
             try:

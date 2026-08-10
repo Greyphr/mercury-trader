@@ -54,7 +54,7 @@ class TrendFollowingStrategy(Strategy):
         rsi_vals = ind.rsi(closes, cfg.rsi_period)
         atr_vals = ind.atr(candles, cfg.atr_period)
         atr_mean = ind.sma(atr_vals, 100)
-        crosses = ind.ema_cross_signal(closes, cfg.fast_ema_period, cfg.slow_ema_period)
+        crosses, ema_fast, ema_slow = ind.ema_cross_signal(closes, cfg.fast_ema_period, cfg.slow_ema_period)
 
         signals: list[Signal] = []
         warmup = max(cfg.slow_ema_period, cfg.trend_ema_period, cfg.atr_period) + 2

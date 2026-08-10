@@ -152,7 +152,7 @@ class TrendConfluenceStrategy(Strategy):
         slow = self.config.entry.slow_ema_period
         if len(candles) < slow + 2:
             return []
-        crosses = ind.ema_cross_signal(
+        crosses, _, _ = ind.ema_cross_signal(
             ind.closes(candles),
             self.config.entry.fast_ema_period,
             slow,

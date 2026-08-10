@@ -48,8 +48,11 @@ def _session_name(sessions: list[TradingSession], dt: datetime) -> str | None:
             continue
         if session.start <= t <= session.end:
             pause = session.pause
-            if pause and pause.get("start") <= t <= pause.get("end"):
-                continue
+            if pause is not None:
+                start = pause.get("start")
+                end = pause.get("end")
+                if start is not None and end is not None and start <= t <= end:
+                    continue
             return session.name
     return None
 
@@ -412,17 +415,21 @@ class ICTStrategy(Strategy):
 
     def generate_signals(self, candles: list[Candle]) -> list[Signal]:
         ict = self.config.ict
-        if ict is None or self._provider is None or not candles:
+        if ict is None:
+            raise ValueError(
+                f"ICTStrategy '{self.config.id}' is missing the required 'ict' config block"
+            )
+        if self._provider is None or not candles:
             return []
         h1 = self._provider(self.config.symbol, "H1", ict.context.h1_bars)
         h4 = self._provider(self.config.symbol, "H4", ict.context.h4_bars)
         h1 = [c for c in h1 if c.symbol == self.config.symbol]
         if len(candles) < 100 or len(h1) < 40 or len(h4) < 20:
             return []
-        return self._run(candles, h1, h4)
+        return self._run(candles, h1, h4, ict)
 
-    def _run(self, m5: list[Candle], h1: list[Candle], h4: list[Candle]) -> list[Signal]:
-        ict = self.config.ict
+    def _run(self, m5: list[Candle], h1: list[Candle], h4: list[Candle],
+             ict: ICTConfig) -> list[Signal]:
         self._signals = []
         tracker = M5Tracker(ict)
         atr_m5 = ind.atr(m5, 14)
@@ -437,7 +444,7 @@ class ICTStrategy(Strategy):
 
         def build_signal(direction: str, setup: _Setup, plus_one: dict, candle: Candle,
                          atr_val: float) -> Signal | None:
-            sig = self._build_signal(direction, setup, plus_one, candle, atr_val, h1_snap, h4_snap, tracker)
+            sig = self._build_signal(ict, direction, setup, plus_one, candle, atr_val, h1_snap, h4_snap, tracker)
             if sig is not None:
                 self._signals.append(sig)
             return sig
@@ -479,10 +486,9 @@ class ICTStrategy(Strategy):
                 self._h1_snapshots[key] = cached
         return cached
 
-    def _build_signal(self, direction: str, setup: _Setup, plus_one: dict, candle: Candle,
-                      atr_val: float, h1: H1Snapshot | None, h4: H4Snapshot | None,
-                      tracker: M5Tracker) -> Signal | None:
-        ict = self.config.ict
+    def _build_signal(self, ict: ICTConfig, direction: str, setup: _Setup, plus_one: dict,
+                      candle: Candle, atr_val: float, h1: H1Snapshot | None,
+                      h4: H4Snapshot | None, tracker: M5Tracker) -> Signal | None:
         atr_val = float(atr_val) if np.isfinite(atr_val) else 1.0
         sl_buffer = ict.sl_buffer_atr * atr_val
         entry = candle.close

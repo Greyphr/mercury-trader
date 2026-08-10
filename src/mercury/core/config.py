@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import yaml
 from dotenv import load_dotenv
@@ -64,8 +64,11 @@ def session_allows(trading_sessions: list[TradingSession], dt: datetime) -> bool
             continue
         if session.start <= t <= session.end:
             pause = session.pause
-            if pause and pause.get("start") <= t <= pause.get("end"):
-                return False
+            if pause is not None:
+                start = pause.get("start")
+                end = pause.get("end")
+                if start is not None and end is not None and start <= t <= end:
+                    return False
             return True
     return False
 
@@ -623,6 +626,6 @@ def load_config(config_dir: str | Path | None = None, *, environment: str | None
     if os.getenv("HERMES_LLM_PROVIDER"):
         mode_ = os.getenv("HERMES_LLM_PROVIDER", "")
         if mode_ in {"hybrid", "local", "external", "none"}:
-            settings.providers.llm.mode = mode_
+            settings.providers.llm.mode = cast(Literal["hybrid", "local", "external", "none"], mode_)
 
     return settings
