@@ -18,7 +18,7 @@ venv/
 # Databases / data
 *.sqlite3
 *.db
-data/
+/data/
 *.parquet
 
 # MT5 terminal artifacts
