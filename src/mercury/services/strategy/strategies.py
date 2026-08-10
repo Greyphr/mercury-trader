@@ -50,26 +50,24 @@ class TrendFollowingStrategy(Strategy):
             return []
 
         closes = ind.closes(candles)
-        ema_fast = ind.ema(closes, cfg.fast_ema_period)
-        ema_slow = ind.ema(closes, cfg.slow_ema_period)
         ema_trend = ind.ema(closes, cfg.trend_ema_period)
         rsi_vals = ind.rsi(closes, cfg.rsi_period)
         atr_vals = ind.atr(candles, cfg.atr_period)
         atr_mean = ind.sma(atr_vals, 100)
+        crosses = ind.ema_cross_signal(closes, cfg.fast_ema_period, cfg.slow_ema_period)
 
         signals: list[Signal] = []
         warmup = max(cfg.slow_ema_period, cfg.trend_ema_period, cfg.atr_period) + 2
 
         for i in range(warmup, len(candles)):
             c = candles[i]
-            if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(ema_trend[i]):
+            if crosses[i] is None or np.isnan(ema_trend[i]):
                 continue
             if np.isnan(rsi_vals[i]) or np.isnan(atr_vals[i]):
                 continue
 
-            prev_fast, prev_slow = ema_fast[i - 1], ema_slow[i - 1]
-            crossed_up = prev_fast <= prev_slow and ema_fast[i] > ema_slow[i]
-            crossed_down = prev_fast >= prev_slow and ema_fast[i] < ema_slow[i]
+            crossed_up = crosses[i] == "up"
+            crossed_down = crosses[i] == "down"
 
             long_ok = (
                 crossed_up
@@ -136,12 +134,13 @@ class TrendFollowingStrategy(Strategy):
 def build_strategies(strategy_configs: list[StrategyConfig], settings: Any | None = None) -> list[Strategy]:
     """Instantiate strategy objects from config.
 
-    ICT/SMC strategies (those declaring an ``ict`` block) need a
-    higher-timeframe context provider plus the base settings (for trading
-    sessions); the caller attaches the provider via
-    :meth:`ICTStrategy.set_context_provider`.
+    ICT/SMC and EMA+trendline confluence strategies (those declaring an
+    ``ict`` or ``trendline`` block) need a higher-timeframe context provider
+    plus the base settings (for trading sessions); the caller attaches the
+    provider via ``set_context_provider``.
     """
     from mercury.services.strategy.ict import ICTStrategy
+    from mercury.services.strategy.trend_confluence import TrendConfluenceStrategy
 
     strategies: list[Strategy] = []
     for cfg in strategy_configs:
@@ -149,8 +148,8 @@ def build_strategies(strategy_configs: list[StrategyConfig], settings: Any | Non
             continue
         if cfg.ict is not None:
             strategies.append(ICTStrategy(cfg, settings=settings))
-        elif cfg.id.endswith("_trend"):
-            strategies.append(TrendFollowingStrategy(cfg))
+        elif cfg.trendline is not None:
+            strategies.append(TrendConfluenceStrategy(cfg, settings=settings))
         else:
             strategies.append(TrendFollowingStrategy(cfg))
     return strategies

@@ -1,0 +1,60 @@
+# ──────────────────────────────────────────────────────────────
+# Strategy — XAUUSD M5 merged EMA + trendline "Action Line /
+# Safety Line" confluence strategy.
+# Entry requires an EMA cross AND an action-line trendline break
+# on the same closed M5 candle, both agreeing on direction. There
+# is no take-profit: the stop trails the opposing safety line and
+# the trade exits when a candle closes beyond it.
+# ──────────────────────────────────────────────────────────────
+
+strategies:
+  - id: xauusd_m5_confluence
+    enabled: false
+    symbol: GOLD
+    timeframe: M5
+    description: Merged EMA cross + chained-trendline confluence; safety-line trailing exit, no TP.
+
+    # — EMA half of the confluence (fast/slow cross on M5).
+    entry:
+      fast_ema_period: 9
+      slow_ema_period: 21
+      trend_ema_period: 50
+      rsi_period: 14
+      rsi_buy_max: 70
+      rsi_sell_min: 30
+      atr_period: 14
+      max_atr_multiplier: 2.5
+      candle_confirmation: true
+
+    # — Order parameters.
+    order:
+      order_type: market              # market | limit | stop
+      direction: both                 # long | short | both
+      sl_pips: 12
+      tp_pips: 20
+      sl_atr_multiplier: 1.5
+      tp_atr_multiplier: 2.5
+      use_atr_levels: true
+      magic: 77002                    # distinct from xauusd_m5_trend (77001)
+
+    # — Filters that disable the strategy.
+    filters:
+      min_spread_points: 5
+      max_spread_points: 30
+      session: full_xauusd
+      avoid_news_minutes: 5
+
+    # — Trendline half of the confluence ("Action Line / Safety Line").
+    trendline:
+      timeframe: H1                   # primary timeframe for the chained lines
+      bars: 1500
+      swing_floor_atr: 0.25           # swing height must be >= floor x ATR(14)
+      tolerance_atr: 0.15             # wick-touch / violation tolerance (x ATR)
+      min_touches: 2                  # segment must be touched this many times
+      sl_buffer_atr: 0.5              # initial SL = safety line +- 0.5 x M5 ATR
+      bias_timeframes:                # optional HTF gate (skip when it opposes)
+        - H4
+
+    # — Success criteria override (merges over global trading_criteria).
+    success:
+      count_breakeven_as_win: true

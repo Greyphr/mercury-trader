@@ -47,6 +47,26 @@ def ema(values: np.ndarray, period: int) -> np.ndarray:
     return out
 
 
+def ema_cross_signal(closes: np.ndarray, fast_period: int, slow_period: int) -> list[str | None]:
+    """EMA cross direction per candle index: ``'up'`` / ``'down'`` / ``None``.
+
+    A candle is ``'up'`` when the fast EMA crosses above the slow EMA on that
+    candle, ``'down'`` when it crosses below; candles during warmup or with no
+    cross return ``None``.
+    """
+    fast = ema(closes, fast_period)
+    slow = ema(closes, slow_period)
+    out: list[str | None] = [None] * len(closes)
+    for i in range(1, len(closes)):
+        if np.isnan(fast[i]) or np.isnan(slow[i]) or np.isnan(fast[i - 1]) or np.isnan(slow[i - 1]):
+            continue
+        if fast[i - 1] <= slow[i - 1] and fast[i] > slow[i]:
+            out[i] = "up"
+        elif fast[i - 1] >= slow[i - 1] and fast[i] < slow[i]:
+            out[i] = "down"
+    return out
+
+
 def rsi(values: np.ndarray, period: int = 14) -> np.ndarray:
     out = np.full(len(values), np.nan)
     if len(values) < period + 1:
@@ -306,6 +326,88 @@ def detect_trendlines(
         if best is not None:
             best.pop("_score", None)
             lines.append(best)
+    return lines
+
+
+def chain_trendlines(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    swing_highs: list[tuple[int, float]],
+    swing_lows: list[tuple[int, float]],
+    atr: np.ndarray,
+    *,
+    tolerance_atr: float,
+    min_touches: int,
+) -> list[dict]:
+    """Chained trendlines built from consecutive swing points of one polarity.
+
+    A segment between two consecutive swing points is valid when its slope
+    points in the trend direction (support segments ascend, resistance
+    segments descend), price never violates it by more than ``tolerance_atr``
+    x ATR between the anchors (support: no low below line - tol; resistance:
+    no high above line + tol), and it is touched (wick within tolerance) at
+    least ``min_touches`` times. Adjacent valid segments chain end-to-end —
+    the previous end becomes the next start — so consecutive uptrend lows form
+    one continuous support line and consecutive downtrend highs one resistance
+    line.
+
+    Returns every valid segment in ``detect_trendlines`` dict shape
+    ``{type, idx1, idx2, slope, touches, last_touch, value_at(idx)}``; the
+    last entry of each type is the most recently established (currently
+    active) line.
+    """
+    n = len(highs)
+    if n < 8:
+        return []
+    mean_atr = float(np.nanmean(atr)) if np.any(np.isfinite(atr)) else 1.0
+    tol = tolerance_atr * mean_atr
+
+    def _value_at(a_idx: int, a_lvl: float, slope: float, k: int) -> float:
+        return a_lvl + slope * (k - a_idx)
+
+    lines: list[dict] = []
+    for kind, points, is_support in (
+        ("support", swing_lows, True),
+        ("resistance", swing_highs, False),
+    ):
+        for i in range(len(points) - 1):
+            a_idx, a_lvl = points[i]
+            b_idx, b_lvl = points[i + 1]
+            if b_idx <= a_idx:
+                continue
+            slope = (b_lvl - a_lvl) / (b_idx - a_idx)
+            if is_support and slope <= 0:
+                continue
+            if not is_support and slope >= 0:
+                continue
+            touches = 0
+            last_touch = -1
+            valid = True
+            for k in range(a_idx, b_idx + 1):
+                v = _value_at(a_idx, a_lvl, slope, k)
+                ref = lows[k] if is_support else highs[k]
+                if is_support and ref < v - tol:
+                    valid = False
+                    break
+                if not is_support and ref > v + tol:
+                    valid = False
+                    break
+                if abs(ref - v) <= tol:
+                    touches += 1
+                    last_touch = k
+            if not valid or touches < min_touches:
+                continue
+            lines.append(
+                {
+                    "type": kind,
+                    "idx1": a_idx,
+                    "idx2": b_idx,
+                    "slope": slope,
+                    "touches": touches,
+                    "last_touch": last_touch,
+                    "value_at": lambda k, a=a_idx, lv=a_lvl, s=slope: _value_at(a, lv, s, k),
+                }
+            )
     return lines
 
 

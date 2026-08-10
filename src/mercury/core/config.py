@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # Load the project .env file (repo root) as process-env defaults. Real
 # environment variables always win (override=False), and load_dotenv is
@@ -280,6 +280,25 @@ class ICTConfig(BaseModel):
     reentry: ICTReentryConfig = ICTReentryConfig()
 
 
+# ── Merged EMA + trendline confluence strategy ────────────────
+class TrendlineConfig(BaseModel):
+    """Action Line / Safety Line confluence parameters.
+
+    Signals require an M5 EMA cross AND an action-line trendline break on the
+    same closed candle, both agreeing on direction. Entries have no fixed
+    take-profit: the stop trails the opposing 'safety line' each management
+    cycle and the trade exits when a candle closes beyond it.
+    """
+
+    timeframe: str = "H1"              # primary timeframe for the trendlines
+    bars: int = 1500                   # candles requested from the provider
+    swing_floor_atr: float = 0.25      # swing height must be >= floor x ATR(14) of its timeframe
+    tolerance_atr: float = 0.15        # wick-touch / violation tolerance (x ATR)
+    min_touches: int = 2               # segment must be touched at least this many times
+    sl_buffer_atr: float = 0.5         # initial SL = safety line +- buffer x M5 ATR(14)
+    bias_timeframes: list[str] = Field(default_factory=list)  # optional HTF bias gate
+
+
 class StrategyConfig(BaseModel):
     id: str
     enabled: bool = True
@@ -291,6 +310,16 @@ class StrategyConfig(BaseModel):
     filters: StrategyFilters = StrategyFilters()
     success: dict[str, Any] | None = None
     ict: ICTConfig | None = None
+    trendline: TrendlineConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_management_exclusive(self) -> "StrategyConfig":
+        if self.ict is not None and self.trendline is not None:
+            raise ValueError(
+                f"strategy '{self.id}' declares both 'ict' and 'trendline'; "
+                "only one management model is allowed"
+            )
+        return self
 
 
 class StrategiesConfig(BaseModel):

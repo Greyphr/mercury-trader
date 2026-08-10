@@ -39,6 +39,7 @@ class CloseReason(StrEnum):
     STOP_LOSS = "sl"
     BREAKEVEN = "breakeven"
     OPPOSITE_BOS = "bos"
+    SAFETY_LINE = "safety_line"
     MANUAL = "manual"
     KILL_SWITCH = "kill_switch"
     TIMEOUT = "timeout"

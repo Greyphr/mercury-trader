@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from mercury.core.events import Event
 from mercury.core.symbols import SymbolMappingError, get_symbol_mapper
 from mercury.models.orm import SystemStateRecord, TradeRecord
-from mercury.models.schemas import Signal, TradeStatus
+from mercury.models.schemas import Direction, Signal, TradeStatus
 from mercury.services.base import BackgroundService
 from mercury.services.execution.broker import (
     BrokerAdapter,
@@ -420,6 +420,7 @@ class ExecutionService(BackgroundService):
                 await self._settle_trade(trade)
 
         await self._manage_ict_positions()
+        await self._manage_trendline_positions()
 
     # ── ICT management (Spec V1) ──────────────────────────────
     async def _manage_ict_positions(self) -> None:
@@ -472,6 +473,95 @@ class ExecutionService(BackgroundService):
                     trade = self._closed_trade(record, close_price, "bos") if result.success else None
                 if trade is not None:
                     await self._settle_trade(trade)
+
+    # ── trendline confluence management ───────────────────────
+    async def _manage_trendline_positions(self) -> None:
+        """Apply the safety-line rules to open trendline-confluence positions:
+        exit when a candle closes beyond the safety line and trail the stop
+        along it (never against the position)."""
+        if self._broker is None:
+            return
+        with self.db.session() as session:
+            open_records = session.query(TradeRecord).filter(
+                TradeRecord.status == TradeStatus.OPEN.value
+            ).all()
+
+        for record in open_records:
+            cfg = self._strategy_cfg(record.strategy_id)
+            if cfg is None or cfg.trendline is None:
+                continue
+            pos = self._broker_position(record.ticket)
+            if pos is None:
+                continue
+            candles = self._recent_m5(record.symbol)
+            if not candles:
+                continue
+            latest = candles[-1]
+            direction = Direction.LONG if record.direction == "long" else Direction.SHORT
+            strategy = self._trendline_strategy(cfg)
+            safety = strategy.safety_value(latest.time, direction)
+            if safety is None:
+                continue
+
+            if (direction == Direction.LONG and latest.close < safety) or (
+                direction == Direction.SHORT and latest.close > safety
+            ):
+                if isinstance(self._broker, PaperBrokerAdapter):
+                    trade = self._broker.close_position_trade(
+                        record.ticket, reason="safety_line", price=latest.close
+                    )
+                else:
+                    result = self._broker.close_position(record.ticket)
+                    trade = self._closed_trade(record, latest.close, "safety_line") if result.success else None
+                if trade is not None:
+                    await self._settle_trade(trade)
+                continue
+
+            import numpy as np
+            from mercury.services.strategy import indicators as ind
+
+            atr_vals = ind.atr(candles, strategy.config.entry.atr_period)
+            atr_val = float(atr_vals[-1]) if np.isfinite(atr_vals[-1]) and atr_vals[-1] > 0 else 1.0
+            buffer = cfg.trendline.sl_buffer_atr * atr_val
+            candidate = round((safety - buffer) if direction == Direction.LONG else (safety + buffer), 2)
+            current_sl = record.sl
+            if direction == Direction.LONG and (current_sl is None or candidate > current_sl):
+                moved = True
+            elif direction == Direction.SHORT and (current_sl is None or candidate < current_sl):
+                moved = True
+            else:
+                moved = False
+            if moved:
+                result = self._broker.modify_position(record.ticket, sl=candidate)
+                if result.success:
+                    with self.db.session() as session:
+                        r = session.get(TradeRecord, record.id)
+                        if r:
+                            r.sl = candidate
+                    self.logger.info("safety line trailed", extra={"ticket": record.ticket})
+
+    def _recent_m5(self, symbol: str) -> "list[Candle]":
+        from mercury.core.validation import Candle
+        from mercury.services.data.historical import load_history_from_db
+
+        rows = load_history_from_db(self.db, symbol, "M5", count=400)
+        if not rows:
+            return []
+        return [Candle.model_validate(r) for r in rows]
+
+    def _trendline_strategy(self, cfg):
+        from mercury.core.validation import Candle
+        from mercury.services.data.historical import load_history
+        from mercury.services.strategy.trend_confluence import TrendConfluenceStrategy
+
+        strategy = TrendConfluenceStrategy(cfg, settings=self.settings)
+        strategy.set_context_provider(
+            lambda symbol, timeframe, count: [
+                Candle.model_validate(c)
+                for c in load_history(self.settings, symbol, timeframe, count=count)
+            ]
+        )
+        return strategy
 
     def _strategy_cfg(self, strategy_id: str | None):
         if strategy_id is None:

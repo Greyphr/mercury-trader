@@ -62,15 +62,17 @@ class BacktestOutput:
 def build_strategy_for_backtest(strategy_cfg, settings) -> Strategy:
     """Instantiate the configured strategy for backtesting.
 
-    ICT strategies get a context provider that pulls H1/H4 history from the
-    live data provider (MT5 when available, synthetic otherwise).
+    ICT and EMA+trendline confluence strategies get a context provider that
+    pulls H1/H4 history from the live data provider (MT5 when available,
+    synthetic otherwise).
     """
     from mercury.services.data.historical import load_history
     from mercury.services.strategy.ict import ICTStrategy
     from mercury.services.strategy.strategies import build_strategies
+    from mercury.services.strategy.trend_confluence import TrendConfluenceStrategy
 
     strategy = build_strategies([strategy_cfg], settings=settings)[0]
-    if isinstance(strategy, ICTStrategy):
+    if isinstance(strategy, (ICTStrategy, TrendConfluenceStrategy)):
         strategy.set_context_provider(
             lambda symbol, timeframe, count: [
                 Candle.model_validate(c) for c in load_history(settings, symbol, timeframe, count=count)
@@ -91,7 +93,9 @@ def run_backtest(
 
     For ICT strategies the configured management rules are simulated:
     move SL to breakeven at ``be_at_r`` (default 1R) and exit early when an
-    opposite M5 break-of-structure forms (default on).
+    opposite M5 break-of-structure forms (default on). For EMA+trendline
+    confluence strategies the safety line is trailed each bar and the trade
+    exits when a candle closes beyond it (no take-profit).
     """
     if len(candles) < 50:
         raise ValueError("not enough candles for backtest")
@@ -99,6 +103,9 @@ def run_backtest(
     ict = getattr(strategy.config, "ict", None)
     be_at_r = ict.management.breakeven_at_r if ict is not None else None
     exit_on_opposite_bos = bool(ict and ict.management.early_exit_on_opposite_bos)
+    trendline = getattr(strategy.config, "trendline", None)
+    is_trendline = trendline is not None
+    sl_buffer = trendline.sl_buffer_atr if trendline else 0.0
 
     signals = strategy.generate_signals(candles)
     time_index = {c.time: i for i, c in enumerate(candles)}
@@ -118,7 +125,9 @@ def run_backtest(
         entry_price = entry_bar.open
         sl = signal.sl or 0.0
         tp = signal.tp or 0.0
-        if sl <= 0 or tp <= 0:
+        if sl <= 0:
+            continue
+        if not is_trendline and tp <= 0:
             continue
 
         risk_per_unit = abs(entry_price - sl)
@@ -137,40 +146,70 @@ def run_backtest(
         closed: tuple[str, float] | None = None
         exit_idx = entry_idx
         breakeven_triggered = False
-        for j in range(entry_idx, len(candles)):
-            bar = candles[j]
-            if direction == 1:
-                if bar.low <= sl:
+        if is_trendline:
+            # Trendline confluence: no TP — trail the safety line and exit on
+            # the first candle that closes beyond it (SL still honored first).
+            for j in range(entry_idx, len(candles)):
+                bar = candles[j]
+                if direction == 1 and bar.low <= sl:
                     closed = ("sl", sl)
                     exit_idx = j
                     break
-                if bar.high >= tp:
-                    closed = ("tp", tp)
-                    exit_idx = j
-                    break
-            else:
-                if bar.high >= sl:
+                if direction == -1 and bar.high >= sl:
                     closed = ("sl", sl)
                     exit_idx = j
                     break
-                if bar.low <= tp:
-                    closed = ("tp", tp)
+                safety = strategy.safety_value(bar.time, signal.direction)
+                if safety is None:
+                    continue
+                if direction == 1 and bar.close < safety:
+                    closed = ("safety_line", bar.close)
                     exit_idx = j
                     break
-            if obos_idx is not None and j == obos_idx:
-                exit_price = bar.close
-                if breakeven_triggered:
-                    exit_price = max(exit_price, entry_price) if direction == 1 else min(exit_price, entry_price)
-                closed = ("bos", exit_price)
-                exit_idx = j
-                break
-            if be_at_r and not breakeven_triggered:
-                if direction == 1 and bar.high >= entry_price + be_at_r * risk_per_unit:
-                    sl = entry_price
-                    breakeven_triggered = True
-                elif direction == -1 and bar.low <= entry_price - be_at_r * risk_per_unit:
-                    sl = entry_price
-                    breakeven_triggered = True
+                if direction == -1 and bar.close > safety:
+                    closed = ("safety_line", bar.close)
+                    exit_idx = j
+                    break
+                candidate = (safety - sl_buffer) if direction == 1 else (safety + sl_buffer)
+                if direction == 1 and candidate > sl:
+                    sl = candidate
+                elif direction == -1 and candidate < sl:
+                    sl = candidate
+        else:
+            for j in range(entry_idx, len(candles)):
+                bar = candles[j]
+                if direction == 1:
+                    if bar.low <= sl:
+                        closed = ("sl", sl)
+                        exit_idx = j
+                        break
+                    if bar.high >= tp:
+                        closed = ("tp", tp)
+                        exit_idx = j
+                        break
+                else:
+                    if bar.high >= sl:
+                        closed = ("sl", sl)
+                        exit_idx = j
+                        break
+                    if bar.low <= tp:
+                        closed = ("tp", tp)
+                        exit_idx = j
+                        break
+                if obos_idx is not None and j == obos_idx:
+                    exit_price = bar.close
+                    if breakeven_triggered:
+                        exit_price = max(exit_price, entry_price) if direction == 1 else min(exit_price, entry_price)
+                    closed = ("bos", exit_price)
+                    exit_idx = j
+                    break
+                if be_at_r and not breakeven_triggered:
+                    if direction == 1 and bar.high >= entry_price + be_at_r * risk_per_unit:
+                        sl = entry_price
+                        breakeven_triggered = True
+                    elif direction == -1 and bar.low <= entry_price - be_at_r * risk_per_unit:
+                        sl = entry_price
+                        breakeven_triggered = True
         if closed is None:
             continue  # never closed within sample
 

@@ -11,6 +11,7 @@ from mercury.models.schemas import Signal
 from mercury.services.base import Service
 from mercury.services.strategy.ict import ICTStrategy
 from mercury.services.strategy.strategies import Strategy, build_strategies
+from mercury.services.strategy.trend_confluence import TrendConfluenceStrategy
 
 
 class StrategyEngineService(Service):
@@ -24,7 +25,7 @@ class StrategyEngineService(Service):
             self.settings.strategies.strategies, settings=self.settings
         )
         for strategy in self._strategies:
-            if isinstance(strategy, ICTStrategy):
+            if isinstance(strategy, (ICTStrategy, TrendConfluenceStrategy)):
                 strategy.set_context_provider(self._context_provider)
         self._candles: dict[tuple[str, str], list[Candle]] = {}
         self._last_emitted: dict[tuple[str, str, str], str] = {}

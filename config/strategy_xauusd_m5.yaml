@@ -6,7 +6,7 @@
 
 strategies:
   - id: xauusd_m5_trend
-    enabled: true
+    enabled: false
     symbol: GOLD
     timeframe: M5
     description: Trend-following EMA cross with ATR-based stops and momentum filter.
