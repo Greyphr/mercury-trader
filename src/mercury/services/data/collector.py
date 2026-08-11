@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
-
 from mercury.core.events import Event
 from mercury.core.symbols import SymbolMappingError, get_symbol_mapper
 from mercury.core.validation import Candle
@@ -112,29 +110,28 @@ class DataCollectorService(BackgroundService):
         self.mark_healthy("tick ok")
 
     def _store_candles(self, candles: list[Candle]) -> None:
-        with self.db.session() as session:
-            existing = {
-                (c.symbol, c.timeframe, c.time) for c in session.scalars(
-                    select(CandleRecord).where(
-                        CandleRecord.symbol == candles[0].symbol,
-                        CandleRecord.timeframe == candles[0].timeframe,
-                        CandleRecord.time.in_([c.time for c in candles]),
-                    )
-                )
+        if not candles:
+            return
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        rows = [
+            {
+                "symbol": c.symbol,
+                "timeframe": c.timeframe,
+                "time": c.time,
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume,
             }
-            to_insert = [
-                CandleRecord(
-                    symbol=c.symbol,
-                    timeframe=c.timeframe,
-                    time=c.time,
-                    open=c.open,
-                    high=c.high,
-                    low=c.low,
-                    close=c.close,
-                    volume=c.volume,
-                )
-                for c in candles
-                if (c.symbol, c.timeframe, c.time) not in existing
-            ]
-            if to_insert:
-                session.add_all(to_insert)
+            for c in candles
+        ]
+        with self.db.session() as session:
+            dialect_name = session.get_bind().dialect.name
+            insert_fn = pg_insert if dialect_name == "postgresql" else sqlite_insert
+            stmt = insert_fn(CandleRecord).values(rows).on_conflict_do_nothing(
+                index_elements=["symbol", "timeframe", "time"]
+            )
+            session.execute(stmt)
